@@ -1,8 +1,8 @@
 # Marvin Execution Tracker
 
-- Last updated (UTC): 2026-03-19T20:09:43+00:00
+- Last updated (UTC): 2026-03-19T20:12:00+00:00
 - Stage: execution
-- Current activity: Executing step 1/14: Inspect repository and restate scope
+- Current activity: Completed step 1/14; ready for step 2.
 
 ## Plan Step Files
 - Step 1: [step-001-inspect-repository-and-restate-scope.md](./step-001-inspect-repository-and-restate-scope.md)
@@ -21,10 +21,9 @@
 - Step 14: [step-014-run-full-validation-compatibility-checks-and-security-review.md](./step-014-run-full-validation-compatibility-checks-and-security-review.md)
 
 ## Completed
-- None yet.
+- [x] 1. Inspect repository and restate scope
 
 ## Remaining
-- [ ] 1. Inspect repository and restate scope
 - [ ] 2. Establish baseline behavior and reproducible test commands
 - [ ] 3. Design token claim model and configuration/schema migration
 - [ ] 4. Implement issuer metadata and JWKS exposure
@@ -43,4 +42,4 @@
 Executor working through ordered plan steps.
 
 ## Recent Notes
-- Starting step 1.
+- Step 1 inspection complete; identified pre-existing JWKS noncompliance and key manager wiring bug in CLI serve path. These are inputs for subsequent steps.
