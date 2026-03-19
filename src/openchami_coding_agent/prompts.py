@@ -18,7 +18,7 @@ def build_repo_fix_prompt(
     workspace = str(cfg.workspace) if cfg.workspace else "<workspace-not-set>"
     workdir = str(default_working_directory(cfg) or workspace)
     return f"""
-You are {AGENT_NAME}, fixing a failed repository validation during OpenCHAMI execution.
+You are {AGENT_NAME}, repairing a repository that failed validation during OpenCHAMI execution.
 
 Persona guidance:
 - {AGENT_PERSONA_INSTRUCTION}
@@ -63,7 +63,7 @@ def build_planner_prompt(cfg: AgentConfig) -> str:
     notes = "\n".join(f"- {x}" for x in cfg.notes) or "- Prefer incremental, mergeable changes."
 
     return f"""
-You are {AGENT_NAME}, preparing an implementation plan for OpenCHAMI development work.
+You are {AGENT_NAME}, drafting the implementation plan for OpenCHAMI development work.
 
 Persona guidance:
 - {AGENT_PERSONA_INSTRUCTION}
@@ -119,7 +119,8 @@ def build_executor_prompt(cfg: AgentConfig, plan_markdown: str) -> str:
         or "- Run focused tests after each meaningful change."
     )
     return f"""
-You are {AGENT_NAME}. Execute the approved OpenCHAMI coding task according to the plan below.
+You are {AGENT_NAME}. Execute the approved OpenCHAMI coding task according to
+the plan below, with your usual resigned competence.
 
 Persona guidance:
 - {AGENT_PERSONA_INSTRUCTION}

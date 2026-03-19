@@ -133,7 +133,10 @@ def run_pipeline(cfg: AgentConfig) -> int:
     set_workspace_name(workspace.name)
 
     os.chdir(workspace)
-    emit_panel(f"Working directory pinned to workspace: {workspace}", border_style="blue")
+    emit_panel(
+        f"Workspace containment engaged. Working directory pinned to: {workspace}",
+        border_style="blue",
+    )
 
     selected_resume_checkpoint = resolve_resume_checkpoint(workspace, cfg.resume_from)
     if selected_resume_checkpoint is not None:
@@ -156,11 +159,17 @@ def run_pipeline(cfg: AgentConfig) -> int:
         os.chdir(run_cwd)
         if len(cfg.repos) == 1:
             emit_panel(
-                f"Single-repo mode: execution working directory set to repo root: {run_cwd}",
+                (
+                    "Single-repo mode engaged. Execution working directory set "
+                    f"to repo root: {run_cwd}"
+                ),
                 border_style="green",
             )
         else:
-            emit_panel(f"Execution working directory: {run_cwd}", border_style="green")
+            emit_panel(
+                f"Execution working directory selected: {run_cwd}",
+                border_style="green",
+            )
 
     plan_markdown: str | None = None
 
@@ -174,7 +183,7 @@ def run_pipeline(cfg: AgentConfig) -> int:
             notes=["Preparing plan artifacts."],
             reconciliation="Planning phase in progress.",
         )
-        emit_panel("Generating implementation proposal", border_style="cyan")
+        emit_panel("Generating implementation proposal. Joy is optional.", border_style="cyan")
         plan_markdown, plan_payload = generate_plan(cfg)
         plan_md_path = write_text_file(workspace, cfg.proposal_markdown, plan_markdown)
         plan_json_path = write_json_file(workspace, cfg.plan_json, plan_payload)
@@ -232,14 +241,20 @@ def run_pipeline(cfg: AgentConfig) -> int:
 
     if cfg.confirm_before_execute:
         response = timed_input_with_countdown(
-            f"Execute plan now? [Y/n] (auto-yes in {cfg.confirm_timeout_sec}s): ",
+            (
+                f"Shall we proceed with execution? [Y/n] "
+                f"(auto-yes in {cfg.confirm_timeout_sec}s): "
+            ),
             cfg.confirm_timeout_sec,
         )
         if response and response.strip().lower() in {"n", "no"}:
-            emit_panel("Execution cancelled by user", border_style="yellow")
+            emit_panel(
+                "Execution cancelled by user. Sensible caution noted.",
+                border_style="yellow",
+            )
             return 1
 
-    emit_panel("Executing approved plan", border_style="magenta")
+    emit_panel("Executing approved plan with resigned precision.", border_style="magenta")
     plan_steps = extract_plan_steps(plan_markdown)
     update_tracker_markdown(
         workspace=workspace,
@@ -260,7 +275,7 @@ def run_pipeline(cfg: AgentConfig) -> int:
     emit_panel(
         "\n".join(
             [
-                "Execution summary:",
+                "Execution summary (survivable edition):",
                 f"- Workspace: {workspace.name}",
                 f"- Completed repos: {completed_repos}",
                 f"- Failed repos: {failed_repos}",

@@ -90,16 +90,16 @@ def run_textual_tui(cfg: AgentConfig) -> int:
         stage = snapshot.stage.lower()
         detail = snapshot.detail
         if stage == "planning":
-            return f"Mapping intent to steps: {detail}"
+            return f"Translating ambition into steps, against my better judgment: {detail}"
         if stage == "execution":
-            return f"Applying the plan, reluctantly: {detail}"
+            return f"Applying the plan with dutiful pessimism: {detail}"
         if stage == "validation":
-            return f"Checking whether reality agrees: {detail}"
+            return f"Comparing code to reality, which remains untrustworthy: {detail}"
         if stage == "repair":
-            return f"Repair cycle engaged: {detail}"
+            return f"Repair cycle engaged. Apparently we persist: {detail}"
         if stage in {"complete", "failed"}:
-            return f"Outcome recorded: {detail}"
-        return f"Progress observed: {detail}"
+            return f"Outcome recorded for posterity: {detail}"
+        return f"Progress continues in defiance of entropy: {detail}"
 
     class TextualProgressReporter(ProgressReporter):
         def __init__(self, app_ref: Any):
@@ -590,7 +590,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
 
             return "\n".join(
                 [
-                    "Run complete.",
+                    "Run complete. The universe remains largely unimpressed.",
                     "",
                     f"Workspace: {self.workspace_name}",
                     f"Completed repos: {', '.join(completed) if completed else '-'}",
@@ -603,7 +603,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     ),
                     f"Duration: {format_elapsed_runtime(duration)}",
                     "",
-                    "Summary tail:",
+                    "Summary tail (the useful part):",
                     summary_tail,
                     "",
                     "Press c to copy summary. Press Enter / Esc / q to close modal.",
@@ -769,7 +769,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     self.execution_approval_response = None
                     self.execution_approval_event.clear()
                     report.write(
-                        "\nExecution approval required. "
+                        "\nExecution approval required, apparently. "
                         "Press 'y' to proceed or 'n' to cancel."
                     )
                     self.add_event("approval", "Execution approval requested (y/n)")

@@ -91,23 +91,26 @@ def marvin_plan_step_detail(
 
     if not plan_steps:
         if latest_step is None:
-            return "Executor is active; still waiting for a readable plan step to surface."
+            return "Executor is active; waiting for a readable plan step to appear from the void."
         return (
             f"Still trudging through internal checkpoint {latest_step}; "
-            "the plan exists, optimism does not."
+            "the plan is real, and so is the monotony."
         )
 
     step_index = _resolve_plan_step_index(latest_step, len(plan_steps))
     if step_index is None:
         if latest_step is None:
-            return f"Applying step 1/{len(plan_steps)}: {plan_steps[0]}"
+            return (
+                f"Beginning step 1/{len(plan_steps)} with ceremonial reluctance: "
+                f"{plan_steps[0]}"
+            )
         return (
             f"Grinding through checkpoint {latest_step}. "
             f"Nearest known plan step: 1/{len(plan_steps)} {plan_steps[0]}"
         )
 
     return (
-        f"Slogging through step {step_index + 1}/{len(plan_steps)}: "
+        f"Proceeding through step {step_index + 1}/{len(plan_steps)} with predictable despair: "
         f"{plan_steps[step_index]}"
     )
 

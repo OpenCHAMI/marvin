@@ -186,8 +186,8 @@ def ensure_repo(repo: RepoSpec) -> None:
                 clone_error = err.strip() or out.strip()
                 emit_panel(
                     (
-                        f"{repo.name}: git clone from local source failed, "
-                        f"copied files instead.\n{clone_error}"
+                        f"{repo.name}: git clone from local source failed; "
+                        f"falling back to a direct file copy.\n{clone_error}"
                     ),
                     border_style="yellow",
                 )
@@ -228,8 +228,8 @@ def ensure_repo(repo: RepoSpec) -> None:
         if code != 0:
             emit_panel(
                 (
-                    f"{repo.name}: could not checkout {repo.branch}; "
-                    f"staying on current branch.\n{err.strip()}"
+                    f"{repo.name}: unable to checkout {repo.branch}; "
+                    f"continuing on the current branch.\n{err.strip()}"
                 ),
                 border_style="yellow",
             )
