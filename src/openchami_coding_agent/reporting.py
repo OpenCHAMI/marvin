@@ -15,7 +15,7 @@ from rich.table import Table
 
 from .constants import AGENT_NAME
 from .models import ProgressSnapshot
-from .utils import format_token_counts
+from .utils import format_elapsed_runtime, format_token_counts
 
 console = Console(file=sys.__stderr__)
 
@@ -90,7 +90,7 @@ class RichProgressReporter(ProgressReporter):
             str(snapshot.failed_repos),
             str(snapshot.retries),
             format_token_counts(snapshot.token_usage),
-            f"{snapshot.elapsed_sec:.1f}s" if snapshot.elapsed_sec is not None else "-",
+            format_elapsed_runtime(snapshot.elapsed_sec),
         )
         console.print(table)
 

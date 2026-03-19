@@ -1,4 +1,6 @@
 from openchami_coding_agent.utils import (
+    format_compact_count,
+    format_elapsed_runtime,
     format_token_counts,
     merge_tokens,
     slugify,
@@ -29,3 +31,21 @@ def test_format_token_counts_uses_sent_received_labels() -> None:
     assert format_token_counts(
         {"input_tokens": 3, "output_tokens": 5, "total_tokens": 8}
     ) == "sent=3 | received=5 | total=8"
+
+
+def test_format_token_counts_uses_compact_units_for_large_values() -> None:
+    assert format_token_counts(
+        {"input_tokens": 12_300, "output_tokens": 502_000, "total_tokens": 1_233_000}
+    ) == "sent=12.3K | received=502K | total=1.2M"
+
+
+def test_format_compact_count_threshold_behavior() -> None:
+    assert format_compact_count(9_999) == "9999"
+    assert format_compact_count(10_000) == "10K"
+    assert format_compact_count(1_250_000) == "1.2M"
+
+
+def test_format_elapsed_runtime_progression() -> None:
+    assert format_elapsed_runtime(7.2) == "7s"
+    assert format_elapsed_runtime(90.0) == "01:30"
+    assert format_elapsed_runtime(3725.0) == "01:02"

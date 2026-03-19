@@ -116,11 +116,38 @@ def merge_tokens(base: dict[str, int], extra: dict[str, int]) -> dict[str, int]:
     }
 
 
+def format_compact_count(value: int) -> str:
+    number = int(value)
+    absolute = abs(number)
+    if absolute < 10_000:
+        return str(number)
+    if absolute < 1_000_000:
+        compact = f"{number / 1_000:.1f}".rstrip("0").rstrip(".")
+        return f"{compact}K"
+    compact = f"{number / 1_000_000:.1f}".rstrip("0").rstrip(".")
+    return f"{compact}M"
+
+
+def format_elapsed_runtime(elapsed_sec: float | None) -> str:
+    if elapsed_sec is None:
+        return "-"
+    seconds = max(0, int(elapsed_sec))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        minutes = seconds // 60
+        remaining = seconds % 60
+        return f"{minutes:02d}:{remaining:02d}"
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    return f"{hours:02d}:{minutes:02d}"
+
+
 def format_token_counts(token_usage: dict[str, int]) -> str:
     return (
-        f"sent={int(token_usage.get('input_tokens', 0))} | "
-        f"received={int(token_usage.get('output_tokens', 0))} | "
-        f"total={int(token_usage.get('total_tokens', 0))}"
+        f"sent={format_compact_count(int(token_usage.get('input_tokens', 0)))} | "
+        f"received={format_compact_count(int(token_usage.get('output_tokens', 0)))} | "
+        f"total={format_compact_count(int(token_usage.get('total_tokens', 0)))}"
     )
 
 

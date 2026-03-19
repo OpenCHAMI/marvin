@@ -22,6 +22,7 @@ from .git_activity import collect_repo_git_activity
 from .models import AgentConfig, ProgressSnapshot
 from .pipeline import run_pipeline_with_reporter
 from .reporting import ProgressReporter
+from .utils import format_compact_count, format_elapsed_runtime
 
 
 def run_textual_tui(cfg: AgentConfig) -> int:
@@ -489,8 +490,12 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                         f"Goal: {self.goal or '-'}",
                         f"Stage: {stage_label}    Current step: {self.current_step}",
                         (
-                            f"Tokens sent/received/total: {sent}/{received}/{total}    "
-                            f"Elapsed: {elapsed}s    Last update: {since_update}s ago"
+                            "Tokens sent/received/total: "
+                            f"{format_compact_count(sent)}/"
+                            f"{format_compact_count(received)}/"
+                            f"{format_compact_count(total)}    "
+                            f"Elapsed: {format_elapsed_runtime(float(elapsed))}    "
+                            f"Last update: {format_elapsed_runtime(float(since_update))} ago"
                         ),
                         (
                             f"Plan progress: [{bar}] {progress_pct}% "
@@ -592,11 +597,11 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     f"Failed repos: {', '.join(failed) if failed else '-'}",
                     (
                         "Tokens sent/received/total: "
-                        f"{int(tokens.get('input_tokens', 0))}/"
-                        f"{int(tokens.get('output_tokens', 0))}/"
-                        f"{int(tokens.get('total_tokens', 0))}"
+                        f"{format_compact_count(int(tokens.get('input_tokens', 0)))}/"
+                        f"{format_compact_count(int(tokens.get('output_tokens', 0)))}/"
+                        f"{format_compact_count(int(tokens.get('total_tokens', 0)))}"
                     ),
-                    f"Duration: {duration if duration is not None else '-'}s",
+                    f"Duration: {format_elapsed_runtime(duration)}",
                     "",
                     "Summary tail:",
                     summary_tail,
