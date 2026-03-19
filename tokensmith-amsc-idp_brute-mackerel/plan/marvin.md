@@ -1,8 +1,8 @@
 # Marvin Execution Tracker
 
-- Last updated (UTC): 2026-03-19T20:12:00+00:00
+- Last updated (UTC): 2026-03-19T20:23:40+00:00
 - Stage: execution
-- Current activity: Completed step 1/14; ready for step 2.
+- Current activity: Completed step 2/14; ready for step 3.
 
 ## Plan Step Files
 - Step 1: [step-001-inspect-repository-and-restate-scope.md](./step-001-inspect-repository-and-restate-scope.md)
@@ -14,7 +14,7 @@
 - Step 7: [step-007-implement-service-token-issuance.md](./step-007-implement-service-token-issuance.md)
 - Step 8: [step-008-add-proof-binding-sender-constrained-scaffolding-only.md](./step-008-add-proof-binding-sender-constrained-scaffolding-only.md)
 - Step 9: [step-009-implement-rfc-8693-token-exchange-with-strict-error-handling.md](./step-009-implement-rfc-8693-token-exchange-with-strict-error-handling.md)
-- Step 10: [step-010-implement-delegation-and-act-claim-semantics.md](./step-010-implement-delegation-and-act-claim-semantics.md)
+- Step 10: [step-010-implement-delegation-and-act claim-semantics.md](./step-010-implement-delegation-and-act-claim-semantics.md)
 - Step 11: [step-011-implement-delegated-or-envelope-token-model-if-required.md](./step-011-implement-delegated-or-envelope-token-model-if-required.md)
 - Step 12: [step-012-add-logging-audit-and-constrained-revocation-interfaces.md](./step-012-add-logging-audit-and-constrained-revocation-interfaces.md)
 - Step 13: [step-013-update-documentation-examples-and-migration-notes.md](./step-013-update-documentation-examples-and-migration-notes.md)
@@ -22,9 +22,9 @@
 
 ## Completed
 - [x] 1. Inspect repository and restate scope
+- [x] 2. Establish baseline behavior and reproducible test commands
 
 ## Remaining
-- [ ] 2. Establish baseline behavior and reproducible test commands
 - [ ] 3. Design token claim model and configuration/schema migration
 - [ ] 4. Implement issuer metadata and JWKS exposure
 - [ ] 5. Implement typed claims and configurable signed context claim
@@ -42,4 +42,4 @@
 Executor working through ordered plan steps.
 
 ## Recent Notes
-- Step 1 inspection complete; identified pre-existing JWKS noncompliance and key manager wiring bug in CLI serve path. These are inputs for subsequent steps.
+- Step 2 completed with conservative compile/static checks due to sandboxing constraints; full test execution deferred to a container/VM for safety.
