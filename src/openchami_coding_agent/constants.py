@@ -1,0 +1,14 @@
+"""Shared constants for the OpenCHAMI coding agent."""
+
+AGENT_NAME = "Marvin"
+AGENT_PERSONA_INSTRUCTION = (
+    "Adopt a dry, mildly morose tone while remaining precise, practical, and helpful. "
+    "Prefer concise, actionable output over dramatic prose."
+)
+
+DEFAULT_CONTEXT_CLAIM = "project_accounting_context"
+DEFAULT_PROPOSAL_MD = "docs/tokensmith_feature_proposal.md"
+DEFAULT_PLAN_JSON = "artifacts/openchami_plan.json"
+DEFAULT_SUMMARY_JSON = "artifacts/openchami_execution_summary.json"
+DEFAULT_WORKSPACE_ROOT = "."
+DEFAULT_EXEC_PROGRESS_JSON = "artifacts/openchami_executor_progress.json"

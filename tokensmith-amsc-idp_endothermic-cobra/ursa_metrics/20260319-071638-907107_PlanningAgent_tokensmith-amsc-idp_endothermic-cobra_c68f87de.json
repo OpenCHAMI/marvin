@@ -1,0 +1,714 @@
+{
+  "context": {
+    "agent": "PlanningAgent",
+    "thread_id": "tokensmith-amsc-idp_endothermic-cobra",
+    "run_id": "c68f87def3fe46769604b8ecd1472049",
+    "started_at": "2026-03-19T11:14:37.385964+00:00",
+    "ended_at": "2026-03-19T11:16:38.903363+00:00"
+  },
+  "tables": {
+    "runnable": [
+      {
+        "name": "node:planning_agent:generate",
+        "count": 8,
+        "total_s": 160.78976837598748,
+        "avg_ms": 20098.721046998435,
+        "max_ms": 44292.36262499762
+      },
+      {
+        "name": "graph:PlanningAgent",
+        "count": 1,
+        "total_s": 121.49143199999526,
+        "avg_ms": 121491.43199999526,
+        "max_ms": 121491.43199999526
+      },
+      {
+        "name": "node:planning_agent:reflect",
+        "count": 3,
+        "total_s": 41.07725816799939,
+        "avg_ms": 13692.41938933313,
+        "max_ms": 41076.326833994244
+      },
+      {
+        "name": "runnable",
+        "count": 3,
+        "total_s": 3.459004801698029e-06,
+        "avg_ms": 0.0011530016005660098,
+        "max_ms": 0.0013750031939707696
+      }
+    ],
+    "tool": [],
+    "llm": [
+      {
+        "name": "llm:gpt-5.4",
+        "count": 3,
+        "total_s": 121.46173991799878,
+        "avg_ms": 40487.24663933293,
+        "max_ms": 44286.59887499816
+      }
+    ]
+  },
+  "totals": {
+    "graph_total_s": 121.49143199999526,
+    "llm_total_s": 121.46173991799878,
+    "tool_total_s": 0,
+    "unattributed_s": 0.029692081996472552
+  },
+  "llm_events": [
+    {
+      "name": "llm:gpt-5.4",
+      "ms": 44286.59887499816,
+      "ok": true,
+      "tags": [
+        "seq:step:1",
+        "PlanningAgent",
+        "generate",
+        "graph",
+        "planning_agent"
+      ],
+      "metadata": {
+        "thread_id": "tokensmith-amsc-idp_endothermic-cobra",
+        "telemetry_run_id": "c68f87def3fe46769604b8ecd1472049",
+        "model": "gpt-5.4",
+        "langgraph_step": 1,
+        "langgraph_node": "generate",
+        "langgraph_triggers": [
+          "branch:to:generate"
+        ],
+        "langgraph_path": [
+          "__pregel_pull",
+          "generate"
+        ],
+        "langgraph_checkpoint_ns": "generate:25b24d15-b339-20a8-102d-033eeef5f2d2",
+        "ursa_ns": "planning_agent",
+        "ursa_agent": "PlanningAgent",
+        "checkpoint_ns": "generate:25b24d15-b339-20a8-102d-033eeef5f2d2",
+        "model_name": "gpt-5.4",
+        "stream": false,
+        "max_completion_tokens": 10000,
+        "_type": "openai-chat",
+        "response_format": "<class 'ursa.agents.planning_agent.Plan'>",
+        "ls_provider": "openai",
+        "ls_model_name": "gpt-5.4",
+        "ls_model_type": "chat",
+        "ls_temperature": null,
+        "ls_max_tokens": 10000,
+        "ls_integration": "langchain_chat_model"
+      },
+      "metrics": {
+        "llm_output": {
+          "token_usage": {
+            "completion_tokens": 2544,
+            "prompt_tokens": 3765,
+            "total_tokens": 6309,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": 0,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cached_tokens": 2816
+            }
+          },
+          "model_provider": "openai",
+          "model_name": "gpt-5.4-2026-03-05",
+          "system_fingerprint": null,
+          "id": "chatcmpl-DL5ck4QMJ9MmaG3rHunbontKttdT8",
+          "service_tier": "default"
+        },
+        "llm_output_token_usage": {
+          "completion_tokens": 2544,
+          "prompt_tokens": 3765,
+          "total_tokens": 6309,
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": 0,
+            "audio_tokens": 0,
+            "reasoning_tokens": 0,
+            "rejected_prediction_tokens": 0
+          },
+          "prompt_tokens_details": {
+            "audio_tokens": 0,
+            "cached_tokens": 2816
+          }
+        },
+        "response_metadata": [
+          {
+            "token_usage": {
+              "completion_tokens": 2544,
+              "prompt_tokens": 3765,
+              "total_tokens": 6309,
+              "completion_tokens_details": {
+                "accepted_prediction_tokens": 0,
+                "audio_tokens": 0,
+                "reasoning_tokens": 0,
+                "rejected_prediction_tokens": 0
+              },
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cached_tokens": 2816
+              }
+            },
+            "model_provider": "openai",
+            "model_name": "gpt-5.4-2026-03-05",
+            "system_fingerprint": null,
+            "id": "chatcmpl-DL5ck4QMJ9MmaG3rHunbontKttdT8",
+            "service_tier": "default",
+            "finish_reason": "stop",
+            "logprobs": null
+          }
+        ],
+        "usage_metadata": [
+          {
+            "input_tokens": 3765,
+            "output_tokens": 2544,
+            "total_tokens": 6309,
+            "input_token_details": {
+              "audio": 0,
+              "cache_read": 2816
+            },
+            "output_token_details": {
+              "audio": 0,
+              "reasoning": 0
+            }
+          }
+        ],
+        "usage_source": "usage_metadata",
+        "usage_rollup": {
+          "input_tokens": 3765,
+          "output_tokens": 2544,
+          "total_tokens": 6309,
+          "input_cost": 0.0,
+          "output_cost": 0.0,
+          "total_cost": 0.0,
+          "prompt_tokens": 3765,
+          "completion_tokens": 2544,
+          "reasoning_tokens": 0,
+          "cached_tokens": 2816
+        }
+      },
+      "t_start": 1773918877.4281301,
+      "t_end": 1773918921.714151
+    },
+    {
+      "name": "llm:gpt-5.4",
+      "ms": 41074.73945899983,
+      "ok": true,
+      "tags": [
+        "PlanningAgent",
+        "planner",
+        "reflect"
+      ],
+      "metadata": {
+        "model": "gpt-5.4",
+        "model_name": "gpt-5.4",
+        "stream": false,
+        "max_completion_tokens": 10000,
+        "_type": "openai-chat",
+        "thread_id": "tokensmith-amsc-idp_endothermic-cobra",
+        "telemetry_run_id": "c68f87def3fe46769604b8ecd1472049",
+        "ls_provider": "openai",
+        "ls_model_name": "gpt-5.4",
+        "ls_model_type": "chat",
+        "ls_temperature": null,
+        "ls_max_tokens": 10000,
+        "ls_integration": "langchain_chat_model"
+      },
+      "metrics": {
+        "llm_output": {
+          "token_usage": {
+            "completion_tokens": 1892,
+            "prompt_tokens": 2750,
+            "total_tokens": 4642,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": 0,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cached_tokens": 0
+            }
+          },
+          "model_provider": "openai",
+          "model_name": "gpt-5.4-2026-03-05",
+          "system_fingerprint": null,
+          "id": "chatcmpl-DL5dS8QiHOtBroDtvmfbhUHVcyu53",
+          "service_tier": "default"
+        },
+        "llm_output_token_usage": {
+          "completion_tokens": 1892,
+          "prompt_tokens": 2750,
+          "total_tokens": 4642,
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": 0,
+            "audio_tokens": 0,
+            "reasoning_tokens": 0,
+            "rejected_prediction_tokens": 0
+          },
+          "prompt_tokens_details": {
+            "audio_tokens": 0,
+            "cached_tokens": 0
+          }
+        },
+        "response_metadata": [
+          {
+            "token_usage": {
+              "completion_tokens": 1892,
+              "prompt_tokens": 2750,
+              "total_tokens": 4642,
+              "completion_tokens_details": {
+                "accepted_prediction_tokens": 0,
+                "audio_tokens": 0,
+                "reasoning_tokens": 0,
+                "rejected_prediction_tokens": 0
+              },
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cached_tokens": 0
+              }
+            },
+            "model_provider": "openai",
+            "model_name": "gpt-5.4-2026-03-05",
+            "system_fingerprint": null,
+            "id": "chatcmpl-DL5dS8QiHOtBroDtvmfbhUHVcyu53",
+            "service_tier": "default",
+            "finish_reason": "stop",
+            "logprobs": null
+          }
+        ],
+        "usage_metadata": [
+          {
+            "input_tokens": 2750,
+            "output_tokens": 1892,
+            "total_tokens": 4642,
+            "input_token_details": {
+              "audio": 0,
+              "cache_read": 0
+            },
+            "output_token_details": {
+              "audio": 0,
+              "reasoning": 0
+            }
+          }
+        ],
+        "usage_source": "usage_metadata",
+        "usage_rollup": {
+          "input_tokens": 2750,
+          "output_tokens": 1892,
+          "total_tokens": 4642,
+          "input_cost": 0.0,
+          "output_cost": 0.0,
+          "total_cost": 0.0,
+          "prompt_tokens": 2750,
+          "completion_tokens": 1892,
+          "reasoning_tokens": 0,
+          "cached_tokens": 0
+        }
+      },
+      "t_start": 1773918921.717887,
+      "t_end": 1773918962.792091
+    },
+    {
+      "name": "llm:gpt-5.4",
+      "ms": 36100.40158400079,
+      "ok": true,
+      "tags": [
+        "seq:step:1",
+        "PlanningAgent",
+        "generate",
+        "graph",
+        "planning_agent"
+      ],
+      "metadata": {
+        "thread_id": "tokensmith-amsc-idp_endothermic-cobra",
+        "telemetry_run_id": "c68f87def3fe46769604b8ecd1472049",
+        "model": "gpt-5.4",
+        "langgraph_step": 3,
+        "langgraph_node": "generate",
+        "langgraph_triggers": [
+          "branch:to:generate"
+        ],
+        "langgraph_path": [
+          "__pregel_pull",
+          "generate"
+        ],
+        "langgraph_checkpoint_ns": "generate:5f11a9d5-26f6-af2c-8dc5-ae91e4ef16af",
+        "ursa_ns": "planning_agent",
+        "ursa_agent": "PlanningAgent",
+        "checkpoint_ns": "generate:5f11a9d5-26f6-af2c-8dc5-ae91e4ef16af",
+        "model_name": "gpt-5.4",
+        "stream": false,
+        "max_completion_tokens": 10000,
+        "_type": "openai-chat",
+        "response_format": "<class 'ursa.agents.planning_agent.Plan'>",
+        "ls_provider": "openai",
+        "ls_model_name": "gpt-5.4",
+        "ls_model_type": "chat",
+        "ls_temperature": null,
+        "ls_max_tokens": 10000,
+        "ls_integration": "langchain_chat_model"
+      },
+      "metrics": {
+        "llm_output": {
+          "token_usage": {
+            "completion_tokens": 1832,
+            "prompt_tokens": 2259,
+            "total_tokens": 4091,
+            "completion_tokens_details": {
+              "accepted_prediction_tokens": 0,
+              "audio_tokens": 0,
+              "reasoning_tokens": 0,
+              "rejected_prediction_tokens": 0
+            },
+            "prompt_tokens_details": {
+              "audio_tokens": 0,
+              "cached_tokens": 0
+            }
+          },
+          "model_provider": "openai",
+          "model_name": "gpt-5.4-2026-03-05",
+          "system_fingerprint": null,
+          "id": "chatcmpl-DL5e7BjKYPgRgP4fFUdg78YRK9h6s",
+          "service_tier": "default"
+        },
+        "llm_output_token_usage": {
+          "completion_tokens": 1832,
+          "prompt_tokens": 2259,
+          "total_tokens": 4091,
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": 0,
+            "audio_tokens": 0,
+            "reasoning_tokens": 0,
+            "rejected_prediction_tokens": 0
+          },
+          "prompt_tokens_details": {
+            "audio_tokens": 0,
+            "cached_tokens": 0
+          }
+        },
+        "response_metadata": [
+          {
+            "token_usage": {
+              "completion_tokens": 1832,
+              "prompt_tokens": 2259,
+              "total_tokens": 4091,
+              "completion_tokens_details": {
+                "accepted_prediction_tokens": 0,
+                "audio_tokens": 0,
+                "reasoning_tokens": 0,
+                "rejected_prediction_tokens": 0
+              },
+              "prompt_tokens_details": {
+                "audio_tokens": 0,
+                "cached_tokens": 0
+              }
+            },
+            "model_provider": "openai",
+            "model_name": "gpt-5.4-2026-03-05",
+            "system_fingerprint": null,
+            "id": "chatcmpl-DL5e7BjKYPgRgP4fFUdg78YRK9h6s",
+            "service_tier": "default",
+            "finish_reason": "stop",
+            "logprobs": null
+          }
+        ],
+        "usage_metadata": [
+          {
+            "input_tokens": 2259,
+            "output_tokens": 1832,
+            "total_tokens": 4091,
+            "input_token_details": {
+              "audio": 0,
+              "cache_read": 0
+            },
+            "output_token_details": {
+              "audio": 0,
+              "reasoning": 0
+            }
+          }
+        ],
+        "usage_source": "usage_metadata",
+        "usage_rollup": {
+          "input_tokens": 2259,
+          "output_tokens": 1832,
+          "total_tokens": 4091,
+          "input_cost": 0.0,
+          "output_cost": 0.0,
+          "total_cost": 0.0,
+          "prompt_tokens": 2259,
+          "completion_tokens": 1832,
+          "reasoning_tokens": 0,
+          "cached_tokens": 0
+        }
+      },
+      "t_start": 1773918962.798238,
+      "t_end": 1773918998.89817
+    }
+  ],
+  "raw_snapshot": {
+    "runnable": {
+      "_starts": {},
+      "agg": {
+        "records": [
+          [
+            "node:planning_agent:generate",
+            0.6270419980864972,
+            true
+          ],
+          [
+            "node:planning_agent:generate",
+            44288.53637500288,
+            true
+          ],
+          [
+            "node:planning_agent:generate",
+            44292.36262499762,
+            true
+          ],
+          [
+            "node:planning_agent:generate",
+            0.24383400159422308,
+            true
+          ],
+          [
+            "runnable",
+            0.0013750031939707696,
+            true
+          ],
+          [
+            "node:planning_agent:reflect",
+            0.40387500484939665,
+            true
+          ],
+          [
+            "node:planning_agent:reflect",
+            41076.326833994244,
+            true
+          ],
+          [
+            "node:planning_agent:reflect",
+            0.5274590002954938,
+            true
+          ],
+          [
+            "runnable",
+            0.0011250012903474271,
+            true
+          ],
+          [
+            "node:planning_agent:generate",
+            0.5721249981434084,
+            true
+          ],
+          [
+            "node:planning_agent:generate",
+            36102.53762499633,
+            true
+          ],
+          [
+            "node:planning_agent:generate",
+            36104.6908329954,
+            true
+          ],
+          [
+            "node:planning_agent:generate",
+            0.19791699742199853,
+            true
+          ],
+          [
+            "runnable",
+            0.0009590003173798323,
+            true
+          ],
+          [
+            "graph:PlanningAgent",
+            121491.43199999526,
+            true
+          ]
+        ],
+        "_lock": "<unlocked _thread.lock object at 0x10e3d54c0>"
+      },
+      "buckets": [
+        [
+          "node:planning_agent:generate",
+          8,
+          160.78976837598748,
+          20098.721046998435,
+          44292.36262499762
+        ],
+        [
+          "graph:PlanningAgent",
+          1,
+          121.49143199999526,
+          121491.43199999526,
+          121491.43199999526
+        ],
+        [
+          "node:planning_agent:reflect",
+          3,
+          41.07725816799939,
+          13692.41938933313,
+          41076.326833994244
+        ],
+        [
+          "runnable",
+          3,
+          3.459004801698029e-06,
+          0.0011530016005660098,
+          0.0013750031939707696
+        ]
+      ]
+    },
+    "tool": {
+      "_starts": {},
+      "agg": {
+        "records": [],
+        "_lock": "<unlocked _thread.lock object at 0x10f3e6d40>"
+      },
+      "buckets": []
+    },
+    "llm": {
+      "_starts": {},
+      "agg": {
+        "records": [
+          [
+            "llm:gpt-5.4",
+            44286.59887499816,
+            true
+          ],
+          [
+            "llm:gpt-5.4",
+            41074.73945899983,
+            true
+          ],
+          [
+            "llm:gpt-5.4",
+            36100.40158400079,
+            true
+          ]
+        ],
+        "_lock": "<unlocked _thread.lock object at 0x10e3d5600>"
+      },
+      "buckets": [
+        [
+          "llm:gpt-5.4",
+          3,
+          121.46173991799878,
+          40487.24663933293,
+          44286.59887499816
+        ]
+      ]
+    }
+  },
+  "raw_records": {
+    "runnable": [
+      {
+        "name": "node:planning_agent:generate",
+        "ms": 0.6270419980864972,
+        "ok": true
+      },
+      {
+        "name": "node:planning_agent:generate",
+        "ms": 44288.53637500288,
+        "ok": true
+      },
+      {
+        "name": "node:planning_agent:generate",
+        "ms": 44292.36262499762,
+        "ok": true
+      },
+      {
+        "name": "node:planning_agent:generate",
+        "ms": 0.24383400159422308,
+        "ok": true
+      },
+      {
+        "name": "runnable",
+        "ms": 0.0013750031939707696,
+        "ok": true
+      },
+      {
+        "name": "node:planning_agent:reflect",
+        "ms": 0.40387500484939665,
+        "ok": true
+      },
+      {
+        "name": "node:planning_agent:reflect",
+        "ms": 41076.326833994244,
+        "ok": true
+      },
+      {
+        "name": "node:planning_agent:reflect",
+        "ms": 0.5274590002954938,
+        "ok": true
+      },
+      {
+        "name": "runnable",
+        "ms": 0.0011250012903474271,
+        "ok": true
+      },
+      {
+        "name": "node:planning_agent:generate",
+        "ms": 0.5721249981434084,
+        "ok": true
+      },
+      {
+        "name": "node:planning_agent:generate",
+        "ms": 36102.53762499633,
+        "ok": true
+      },
+      {
+        "name": "node:planning_agent:generate",
+        "ms": 36104.6908329954,
+        "ok": true
+      },
+      {
+        "name": "node:planning_agent:generate",
+        "ms": 0.19791699742199853,
+        "ok": true
+      },
+      {
+        "name": "runnable",
+        "ms": 0.0009590003173798323,
+        "ok": true
+      },
+      {
+        "name": "graph:PlanningAgent",
+        "ms": 121491.43199999526,
+        "ok": true
+      }
+    ],
+    "tool": [],
+    "llm": [
+      {
+        "name": "llm:gpt-5.4",
+        "ms": 44286.59887499816,
+        "ok": true
+      },
+      {
+        "name": "llm:gpt-5.4",
+        "ms": 41074.73945899983,
+        "ok": true
+      },
+      {
+        "name": "llm:gpt-5.4",
+        "ms": 36100.40158400079,
+        "ok": true
+      }
+    ]
+  },
+  "costs": {
+    "total_usd": 0.0,
+    "by_model_usd": {},
+    "event_sources": {
+      "provider": 0,
+      "computed": 0,
+      "no_usage": 0,
+      "no_pricing": 3
+    },
+    "registry_note": "Edit pricing via DEFAULT_REGISTRY, pricing.json, or overrides."
+  }
+}

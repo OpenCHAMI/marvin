@@ -1,0 +1,146 @@
+"""Utilities used by multiple OpenCHAMI coding agent modules."""
+
+from __future__ import annotations
+
+import io
+import re
+import subprocess
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
+from pathlib import Path
+from typing import Any
+
+from langchain_core.messages import HumanMessage
+
+from .models import InvocationCapture
+
+
+def to_plain_data(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: to_plain_data(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_plain_data(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(to_plain_data(v) for v in value)
+    if hasattr(value, "__dict__") and not isinstance(value, (str, bytes, Path)):
+        try:
+            return {k: to_plain_data(v) for k, v in vars(value).items()}
+        except TypeError:
+            pass
+    return value
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug or "openchami-task"
+
+
+def run_command(
+    args: list[str], cwd: Path | None = None, timeout: int = 900
+) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(
+            args,
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception as exc:
+        return 1, "", str(exc)
+    return result.returncode, result.stdout, result.stderr
+
+
+def progress_file(base: Path, rel_path: str) -> Path:
+    return (base / rel_path).resolve()
+
+
+def load_exec_progress(base: Path, rel_path: str) -> dict[str, Any]:
+    from ursa.util.plan_execute_utils import load_json_file
+
+    return load_json_file(progress_file(base, rel_path), {})
+
+
+def save_exec_progress(base: Path, rel_path: str, payload: dict[str, Any]) -> Path:
+    from ursa.util.plan_execute_utils import save_json_file
+
+    path = progress_file(base, rel_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_json_file(path, payload)
+    return path
+
+
+def write_text_file(base: Path, rel_path: str, content: str) -> Path:
+    path = (base / rel_path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content.rstrip() + "\n", encoding="utf-8")
+    return path
+
+
+def write_json_file(base: Path, rel_path: str, payload: Any) -> Path:
+    from ursa.util.plan_execute_utils import save_json_file
+
+    path = (base / rel_path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    save_json_file(path, payload)
+    return path
+
+
+def truncate_tail(text: str, max_chars: int) -> str:
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def extract_agent_tokens(agent: Any) -> dict[str, int]:
+    totals = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    telemetry = getattr(agent, "telemetry", None)
+    llm = getattr(telemetry, "llm", None)
+    samples = getattr(llm, "samples", None)
+    if not samples:
+        return totals
+    for sample in samples:
+        metrics = sample.get("metrics") or {}
+        rollup = metrics.get("usage_rollup") or metrics.get("usage") or {}
+        totals["input_tokens"] += int(rollup.get("input_tokens", 0) or 0)
+        totals["output_tokens"] += int(rollup.get("output_tokens", 0) or 0)
+        totals["total_tokens"] += int(rollup.get("total_tokens", 0) or 0)
+    return totals
+
+
+def merge_tokens(base: dict[str, int], extra: dict[str, int]) -> dict[str, int]:
+    return {
+        "input_tokens": int(base.get("input_tokens", 0)) + int(extra.get("input_tokens", 0)),
+        "output_tokens": int(base.get("output_tokens", 0)) + int(extra.get("output_tokens", 0)),
+        "total_tokens": int(base.get("total_tokens", 0)) + int(extra.get("total_tokens", 0)),
+    }
+
+
+def format_token_counts(token_usage: dict[str, int]) -> str:
+    return (
+        f"sent={int(token_usage.get('input_tokens', 0))} | "
+        f"received={int(token_usage.get('output_tokens', 0))} | "
+        f"total={int(token_usage.get('total_tokens', 0))}"
+    )
+
+
+def invoke_agent(agent: Any, prompt: str, verbose_io: bool) -> InvocationCapture:
+    stdout_buffer = io.StringIO()
+    stderr_buffer = io.StringIO()
+    out_ctx = nullcontext() if verbose_io else redirect_stdout(stdout_buffer)
+    err_ctx = nullcontext() if verbose_io else redirect_stderr(stderr_buffer)
+    with out_ctx, err_ctx:
+        response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
+
+    if isinstance(response, dict):
+        messages = response.get("messages") or []
+        last = messages[-1] if messages else response
+        content = getattr(last, "content", None) or str(last)
+    else:
+        content = getattr(response, "content", None) or str(response)
+
+    return InvocationCapture(
+        content=content,
+        captured_stdout=stdout_buffer.getvalue(),
+        captured_stderr=stderr_buffer.getvalue(),
+    )

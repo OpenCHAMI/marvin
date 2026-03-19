@@ -1,0 +1,224 @@
+{
+  "context": {
+    "agent": "PlanningAgent",
+    "thread_id": "tokensmith-amsc-idp_salty-cheetah",
+    "run_id": "3f515cf4bb6347e8b1456ecf947ad6cd",
+    "started_at": "2026-03-19T11:13:24.172013+00:00",
+    "ended_at": "2026-03-19T11:13:25.537195+00:00"
+  },
+  "tables": {
+    "runnable": [
+      {
+        "name": "node:planning_agent:generate",
+        "count": 2,
+        "total_s": 2.710153583000647,
+        "avg_ms": 1355.0767915003235,
+        "max_ms": 1355.833249996067
+      },
+      {
+        "name": "graph:PlanningAgent",
+        "count": 1,
+        "total_s": 1.3635348749958212,
+        "avg_ms": 1363.5348749958212,
+        "max_ms": 1363.5348749958212
+      },
+      {
+        "name": "runnable",
+        "count": 1,
+        "total_s": 1.6660051187500358e-06,
+        "avg_ms": 0.0016660051187500358,
+        "max_ms": 0.0016660051187500358
+      }
+    ],
+    "tool": [],
+    "llm": [
+      {
+        "name": "llm:gpt-5.4",
+        "count": 1,
+        "total_s": 1.3537534580027568,
+        "avg_ms": 1353.7534580027568,
+        "max_ms": 1353.7534580027568
+      }
+    ]
+  },
+  "totals": {
+    "graph_total_s": 1.3635348749958212,
+    "llm_total_s": 1.3537534580027568,
+    "tool_total_s": 0,
+    "unattributed_s": 0.00978141699306434
+  },
+  "llm_events": [
+    {
+      "name": "llm:gpt-5.4",
+      "ms": 1353.7534580027568,
+      "ok": false,
+      "tags": [
+        "seq:step:1",
+        "PlanningAgent",
+        "generate",
+        "graph",
+        "planning_agent"
+      ],
+      "metadata": {
+        "thread_id": "tokensmith-amsc-idp_salty-cheetah",
+        "telemetry_run_id": "3f515cf4bb6347e8b1456ecf947ad6cd",
+        "model": "gpt-5.4",
+        "langgraph_step": 18,
+        "langgraph_node": "generate",
+        "langgraph_triggers": [
+          "branch:to:generate"
+        ],
+        "langgraph_path": [
+          "__pregel_pull",
+          "generate"
+        ],
+        "langgraph_checkpoint_ns": "generate:187e3239-1dad-52c8-bfcd-2721b7eca0fe",
+        "ursa_ns": "planning_agent",
+        "ursa_agent": "PlanningAgent",
+        "checkpoint_ns": "generate:187e3239-1dad-52c8-bfcd-2721b7eca0fe",
+        "model_name": "gpt-5.4",
+        "stream": false,
+        "max_completion_tokens": 10000,
+        "_type": "openai-chat",
+        "response_format": "<class 'ursa.agents.planning_agent.Plan'>",
+        "ls_provider": "openai",
+        "ls_model_name": "gpt-5.4",
+        "ls_model_type": "chat",
+        "ls_temperature": null,
+        "ls_max_tokens": 10000,
+        "ls_integration": "langchain_chat_model"
+      },
+      "metrics": {
+        "error": "APIConnectionError('Connection error.')"
+      },
+      "t_start": 1773918804.178516,
+      "t_end": 1773918805.532255
+    }
+  ],
+  "raw_snapshot": {
+    "runnable": {
+      "_starts": {},
+      "agg": {
+        "records": [
+          [
+            "node:planning_agent:generate",
+            1354.3203330045799,
+            false
+          ],
+          [
+            "node:planning_agent:generate",
+            1355.833249996067,
+            false
+          ],
+          [
+            "runnable",
+            0.0016660051187500358,
+            false
+          ],
+          [
+            "graph:PlanningAgent",
+            1363.5348749958212,
+            false
+          ]
+        ],
+        "_lock": "<unlocked _thread.lock object at 0x1147e4440>"
+      },
+      "buckets": [
+        [
+          "node:planning_agent:generate",
+          2,
+          2.710153583000647,
+          1355.0767915003235,
+          1355.833249996067
+        ],
+        [
+          "graph:PlanningAgent",
+          1,
+          1.3635348749958212,
+          1363.5348749958212,
+          1363.5348749958212
+        ],
+        [
+          "runnable",
+          1,
+          1.6660051187500358e-06,
+          0.0016660051187500358,
+          0.0016660051187500358
+        ]
+      ]
+    },
+    "tool": {
+      "_starts": {},
+      "agg": {
+        "records": [],
+        "_lock": "<unlocked _thread.lock object at 0x1147e47c0>"
+      },
+      "buckets": []
+    },
+    "llm": {
+      "_starts": {},
+      "agg": {
+        "records": [
+          [
+            "llm:gpt-5.4",
+            1353.7534580027568,
+            false
+          ]
+        ],
+        "_lock": "<unlocked _thread.lock object at 0x1147e4900>"
+      },
+      "buckets": [
+        [
+          "llm:gpt-5.4",
+          1,
+          1.3537534580027568,
+          1353.7534580027568,
+          1353.7534580027568
+        ]
+      ]
+    }
+  },
+  "raw_records": {
+    "runnable": [
+      {
+        "name": "node:planning_agent:generate",
+        "ms": 1354.3203330045799,
+        "ok": false
+      },
+      {
+        "name": "node:planning_agent:generate",
+        "ms": 1355.833249996067,
+        "ok": false
+      },
+      {
+        "name": "runnable",
+        "ms": 0.0016660051187500358,
+        "ok": false
+      },
+      {
+        "name": "graph:PlanningAgent",
+        "ms": 1363.5348749958212,
+        "ok": false
+      }
+    ],
+    "tool": [],
+    "llm": [
+      {
+        "name": "llm:gpt-5.4",
+        "ms": 1353.7534580027568,
+        "ok": false
+      }
+    ]
+  },
+  "costs": {
+    "total_usd": 0.0,
+    "by_model_usd": {},
+    "event_sources": {
+      "provider": 0,
+      "computed": 0,
+      "no_usage": 1,
+      "no_pricing": 0
+    },
+    "registry_note": "Edit pricing via DEFAULT_REGISTRY, pricing.json, or overrides."
+  }
+}
