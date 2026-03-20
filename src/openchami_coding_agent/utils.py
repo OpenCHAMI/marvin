@@ -151,6 +151,75 @@ def format_token_counts(token_usage: dict[str, int]) -> str:
     )
 
 
+def extract_brief_model_message(
+    text: str | None,
+    fallback: str,
+    *,
+    max_chars: int = 180,
+) -> str:
+    if not text or not text.strip():
+        return fallback
+
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("```"):
+            continue
+        line = re.sub(r"^#+\s*", "", line)
+        line = re.sub(r"^[-*+]\s+", "", line)
+        line = re.sub(r"^\d+[.)]\s+", "", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if line:
+            cleaned_lines.append(line)
+
+    message = cleaned_lines[0] if cleaned_lines else re.sub(r"\s+", " ", text).strip()
+    if len(message) > max_chars:
+        message = message[: max_chars - 1].rstrip() + "…"
+    return message or fallback
+
+
+def extract_agent_status_message(
+    agent: Any,
+    fallback: str,
+    *,
+    max_chars: int = 180,
+) -> str:
+    telemetry = getattr(agent, "telemetry", None)
+    llm = getattr(telemetry, "llm", None)
+    samples = getattr(llm, "samples", None) or []
+    if not isinstance(samples, list) or not samples:
+        return fallback
+
+    preferred_keys = (
+        "assistant",
+        "completion",
+        "response",
+        "output",
+        "message",
+        "content",
+        "text",
+    )
+    banned_keys = ("prompt", "input", "system", "user", "human", "request")
+
+    for sample in reversed(samples):
+        if not isinstance(sample, dict):
+            continue
+        candidates: list[str] = []
+        for key, value in sample.items():
+            key_text = str(key).lower()
+            if any(blocked in key_text for blocked in banned_keys):
+                continue
+            if not isinstance(value, str) or not value.strip():
+                continue
+            if any(pref in key_text for pref in preferred_keys):
+                return extract_brief_model_message(value, fallback, max_chars=max_chars)
+            candidates.append(value)
+        if candidates:
+            return extract_brief_model_message(candidates[0], fallback, max_chars=max_chars)
+
+    return fallback
+
+
 def invoke_agent(agent: Any, prompt: str, verbose_io: bool) -> InvocationCapture:
     stdout_buffer = io.StringIO()
     stderr_buffer = io.StringIO()

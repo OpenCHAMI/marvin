@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import sqlite3
-import time
 from typing import Any
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -30,7 +29,9 @@ from .reporting import (
     set_workspace_name,
 )
 from .utils import (
+    extract_agent_status_message,
     extract_agent_tokens,
+    extract_brief_model_message,
     invoke_agent,
     progress_file,
     write_json_file,
@@ -72,15 +73,12 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
     )
     planner.thread_id = thread_id
     prompt = build_planner_prompt(cfg)
-    planning_started = time.time()
 
     def planning_detail_provider() -> str:
-        elapsed = time.time() - planning_started
-        if elapsed < 20:
-            return "Sorting requirements into something almost coherent."
-        if elapsed < 60:
-            return "Drafting step order and pretending this will be straightforward."
-        return "Still shaping plan steps; the model is thinking at geological speed."
+        return extract_agent_status_message(
+            planner,
+            fallback="Planning in progress.",
+        )
 
     render_run_progress(
         stage="planning",
@@ -89,13 +87,17 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
     )
     with progress_heartbeat(
         stage="planning",
-        detail="Planning in progress (waiting for LLM response)",
+        detail="Planning in progress.",
         detail_provider=planning_detail_provider,
         token_usage_provider=lambda: extract_agent_tokens(planner),
         total_repos_provider=lambda: len(cfg.repos),
     ):
         invocation = invoke_agent(planner, prompt, cfg.verbose_io)
     plan_markdown = invocation.content
+    planner_message = extract_brief_model_message(
+        plan_markdown,
+        fallback="Plan generated.",
+    )
 
     plan_payload = {
         "project": cfg.project,
@@ -117,7 +119,7 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
     planner_conn.close()
     render_run_progress(
         stage="planning",
-        detail="Plan generated",
+        detail=planner_message,
         token_usage=plan_payload.get("token_usage") or {},
     )
     return plan_markdown, plan_payload
@@ -191,7 +193,10 @@ def run_pipeline(cfg: AgentConfig) -> int:
         tracker_path = update_tracker_markdown(
             workspace=workspace,
             stage="planning",
-            activity="Plan generation finished; awaiting execution decision.",
+            activity=(
+                "Planner update: "
+                f"{extract_brief_model_message(plan_markdown, 'Plan generated.')}"
+            ),
             plan_steps=plan_steps,
             completed_step_indices=set(),
             notes=[

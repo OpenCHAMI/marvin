@@ -17,6 +17,7 @@ from .prompts import build_executor_prompt, build_repo_fix_prompt
 from .reporting import emit_panel, progress_heartbeat, render_check_status, render_run_progress
 from .utils import (
     extract_agent_tokens,
+    extract_brief_model_message,
     invoke_agent,
     load_exec_progress,
     merge_tokens,
@@ -364,6 +365,10 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
                 invocation = invoke_agent(executor, step_prompt, cfg.verbose_io)
 
             step_summary = invocation.content.strip()
+            step_status = extract_brief_model_message(
+                step_summary,
+                fallback=f"Completed step {step_index + 1}/{len(plan_steps)}.",
+            )
             summary = (
                 f"{summary}\n\n---\n"
                 f"Step {step_index + 1}/{len(plan_steps)}\n"
@@ -386,7 +391,10 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
             update_tracker_markdown(
                 workspace=workspace,
                 stage="execution",
-                activity=f"Completed step {step_index + 1}/{len(plan_steps)}: {step_text}",
+                activity=(
+                    f"Step {step_index + 1}/{len(plan_steps)} update: "
+                    f"{step_status}"
+                ),
                 plan_steps=plan_steps,
                 completed_step_indices=set(range(step_index + 1)),
                 notes=[f"Step {step_index + 1} finished."],
@@ -421,6 +429,19 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
         ):
             invocation = invoke_agent(executor, base_executor_prompt, cfg.verbose_io)
         summary = invocation.content
+        fallback_status = extract_brief_model_message(
+            summary,
+            fallback="Executor finished fallback pass.",
+        )
+        update_tracker_markdown(
+            workspace=workspace,
+            stage="execution",
+            activity=f"Executor update: {fallback_status}",
+            plan_steps=plan_steps,
+            completed_step_indices=set(),
+            notes=["Fallback full-plan pass completed."],
+            reconciliation="Fallback pass complete.",
+        )
         token_usage = merge_tokens(token_usage, extract_agent_tokens(executor))
         save_exec_progress(
             workspace,
@@ -666,6 +687,10 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
             ):
                 fix_invocation = invoke_agent(executor, fix_prompt, cfg.verbose_io)
             fix_summary = fix_invocation.content
+            fix_status = extract_brief_model_message(
+                fix_summary,
+                fallback=f"Repair applied for {repo.name}.",
+            )
             summary = (
                 f"{summary}\n\n---\n"
                 f"Auto-repair for {repo.name} (attempt {attempt + 1}):\n{fix_summary}"
@@ -687,7 +712,7 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
             update_tracker_markdown(
                 workspace=workspace,
                 stage="repair",
-                activity=f"Auto-repair applied for {repo.name} (attempt {attempt + 1}).",
+                activity=f"Repair update for {repo.name}: {fix_status}",
                 plan_steps=plan_steps,
                 completed_step_indices=_completed_step_indices_from_checkpoint(
                     workspace, plan_steps

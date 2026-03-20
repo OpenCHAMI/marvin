@@ -13,6 +13,7 @@ import time
 import traceback
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from rich.table import Table
@@ -86,20 +87,55 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             ]
         )
 
-    def marvin_commentary_from_progress(snapshot: ProgressSnapshot) -> str:
+    def marvin_commentary_from_progress(
+        snapshot: ProgressSnapshot,
+        cycle_index: int = 0,
+    ) -> str:
         stage = snapshot.stage.lower()
-        detail = snapshot.detail
-        if stage == "planning":
-            return f"Translating ambition into steps, against my better judgment: {detail}"
-        if stage == "execution":
-            return f"Applying the plan with dutiful pessimism: {detail}"
-        if stage == "validation":
-            return f"Comparing code to reality, which remains untrustworthy: {detail}"
-        if stage == "repair":
-            return f"Repair cycle engaged. Apparently we persist: {detail}"
-        if stage in {"complete", "failed"}:
-            return f"Outcome recorded for posterity: {detail}"
-        return f"Progress continues in defiance of entropy: {detail}"
+        detail = (snapshot.detail or "").strip()
+        variants: dict[str, list[str]] = {
+            "planning": [
+                "I am distilling ambition into a plan",
+                "I am translating intent into sequenced regret",
+                "I am arranging requirements into something almost coherent",
+            ],
+            "execution": [
+                "I am executing the plan despite obvious cosmic objections",
+                "I am applying changes with the enthusiasm of a dying star",
+                "I am progressing through steps because stalling solves nothing",
+            ],
+            "validation": [
+                "I am comparing our changes with reality, which is rarely cooperative",
+                "I am checking whether tests agree with our fiction",
+                "I am validating outcomes before confidence embarrasses us",
+            ],
+            "repair": [
+                "I am repairing the latest collapse",
+                "I am patching consequences one avoidable failure at a time",
+                "I am in repair mode, where optimism goes to be disproven",
+            ],
+            "complete": [
+                "The run has concluded, improbably",
+                "Execution is complete; the universe has not objected yet",
+                "This pass is done. Please try not to wake another bug",
+            ],
+            "failed": [
+                "The run has failed, as entropy prefers",
+                "We have reached an unscheduled lesson in humility",
+                "Failure is confirmed; at least it is now measurable",
+            ],
+            "default": [
+                "Progress continues with predictable melancholy",
+                "Activity persists while certainty remains unavailable",
+                "Another update arrives from the abyss",
+            ],
+        }
+        stage_variants = variants.get(stage, variants["default"])
+        preface = stage_variants[cycle_index % len(stage_variants)]
+
+        if detail:
+            return f"{preface}: {detail}"
+        return f"{preface}."
 
     class TextualProgressReporter(ProgressReporter):
         def __init__(self, app_ref: Any):
@@ -175,6 +211,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             ("d", "filter_diagnostic", "Timeline: diagnostics"),
             ("u", "filter_approval", "Timeline: approvals"),
             ("g", "filter_git", "Timeline: git"),
+            ("b", "plan_back", "Plan: back"),
             ("f", "cycle_event_filter", "Cycle filters"),
             ("?", "show_shortcuts", "Help"),
             ("q", "quit", "Quit"),
@@ -272,8 +309,16 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                 "event",
             ]
             self.git_activity_cache: dict[str, tuple[int, int, int, str, str]] = {}
-            self.plan_tracker_mtime: float = 0.0
+            self.plan_doc_mtime: dict[Path, float] = {}
             self.last_commentary_key: tuple[str, str] | None = None
+            self.commentary_cycle_index: dict[str, int] = {}
+
+            self.plan_root_path: Path | None = None
+            self.plan_current_path: Path | None = None
+            self.plan_history: list[Path] = []
+            if cfg.workspace is not None:
+                self.plan_root_path = (cfg.workspace / "plan" / "marvin.md").resolve()
+                self.plan_current_path = self.plan_root_path
 
         def compose(self) -> Any:
             yield Header(show_clock=True)
@@ -339,8 +384,8 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                 "- Shortcuts: a/e/p/k/d/u/g filters, f cycle filter, ? help, q quit"
             )
             commentary.write(
-                "Marvin commentary online: I will narrate progress "
-                "so you can verify intent and movement."
+                "Marvin commentary online. I will provide the emotional damage; "
+                "the status panels will provide the facts."
             )
 
             self.set_interval(0.2, self.drain_events)
@@ -348,6 +393,97 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             self.set_interval(1.0, self.refresh_plan_tracker)
             self.set_interval(2.0, self.refresh_git_activity)
             threading.Thread(target=self.run_pipeline, daemon=True).start()
+
+        def _set_plan_border_title(self) -> None:
+            markdown = self.query_one("#plan_markdown", Markdown)
+            workspace = cfg.workspace
+            if workspace is None or self.plan_current_path is None:
+                markdown.border_title = "Plan"
+                return
+            try:
+                rel = self.plan_current_path.resolve().relative_to(workspace.resolve())
+                label = str(rel)
+            except Exception:
+                label = str(self.plan_current_path)
+            suffix = "  [b: back]" if self.plan_history else ""
+            markdown.border_title = f"Plan ({label}){suffix}"
+
+        def _update_plan_markdown(self, force: bool = False) -> None:
+            markdown = self.query_one("#plan_markdown", Markdown)
+            path = self.plan_current_path
+            if path is None:
+                markdown.update("# Plan Tracker\n\nWorkspace is not set.")
+                self._set_plan_border_title()
+                return
+
+            if not path.exists():
+                markdown.update(f"# Plan Tracker\n\nFile not found: `{path}`")
+                self._set_plan_border_title()
+                return
+
+            stat = path.stat()
+            last_mtime = self.plan_doc_mtime.get(path)
+            if not force and last_mtime is not None and stat.st_mtime <= last_mtime:
+                self._set_plan_border_title()
+                return
+
+            self.plan_doc_mtime[path] = stat.st_mtime
+            markdown.update(path.read_text(encoding="utf-8"))
+            self._set_plan_border_title()
+
+        def _resolve_plan_link_target(self, href: str) -> Path | None:
+            workspace = cfg.workspace
+            current = self.plan_current_path
+            if workspace is None or current is None:
+                return None
+
+            target_ref = href.strip()
+            if not target_ref:
+                return None
+            if target_ref.startswith(("http://", "https://", "mailto:")):
+                return None
+
+            target_ref = target_ref.split("#", 1)[0].strip()
+            if not target_ref:
+                return None
+
+            target_path = Path(target_ref)
+            if not target_path.is_absolute():
+                target_path = (current.parent / target_path).resolve()
+
+            try:
+                target_path.relative_to(workspace.resolve())
+            except Exception:
+                return None
+
+            if target_path.suffix.lower() != ".md":
+                return None
+            if not target_path.exists():
+                return None
+            return target_path
+
+        def action_plan_back(self) -> None:
+            if not self.plan_history:
+                return
+            self.plan_current_path = self.plan_history.pop()
+            self._update_plan_markdown(force=True)
+            self.add_event("event", "Plan view: back")
+
+        def on_markdown_link_clicked(self, event) -> None:
+            href = str(getattr(event, "href", "") or "").strip()
+            target_path = self._resolve_plan_link_target(href)
+            if target_path is None:
+                return
+
+            if self.plan_current_path is not None and self.plan_current_path != target_path:
+                self.plan_history.append(self.plan_current_path)
+            self.plan_current_path = target_path
+            self._update_plan_markdown(force=True)
+            self.add_event("event", f"Plan view: opened {target_path.name}")
+
+            stop = getattr(event, "stop", None)
+            if callable(stop):
+                stop()
 
         def _event_matches_filter(self, event_type: str, is_error: bool) -> bool:
             mode = self.event_filter_mode
@@ -427,6 +563,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                 "- d: timeline diagnostics\n"
                 "- u: timeline approvals\n"
                 "- g: timeline git\n"
+                "- b: back in plan markdown view\n"
                 "- f: cycle timeline filters\n"
                 "- q: quit"
             )
@@ -507,33 +644,40 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             )
 
         def refresh_plan_tracker(self) -> None:
-            markdown = self.query_one("#plan_markdown", Markdown)
             workspace = cfg.workspace
             if workspace is None:
-                markdown.update("# Plan Tracker\n\nWorkspace is not set.")
+                self.plan_current_path = None
+                self._update_plan_markdown(force=True)
                 return
 
-            path = workspace / "plan" / "marvin.md"
-            if not path.exists():
+            root_path = (workspace / "plan" / "marvin.md").resolve()
+            if self.plan_root_path is None:
+                self.plan_root_path = root_path
+            if self.plan_current_path is None:
+                self.plan_current_path = self.plan_root_path
+
+            if not root_path.exists():
+                markdown = self.query_one("#plan_markdown", Markdown)
                 markdown.update("# Plan Tracker\n\nWaiting for `plan/marvin.md` to appear…")
+                self._set_plan_border_title()
                 return
 
-            stat = path.stat()
-            if stat.st_mtime <= self.plan_tracker_mtime:
-                return
+            root_content = root_path.read_text(encoding="utf-8")
 
-            self.plan_tracker_mtime = stat.st_mtime
-            content = path.read_text(encoding="utf-8")
-            markdown.update(content)
-
-            activity_match = re.search(r"^- Current activity:\s*(.+)$", content, flags=re.MULTILINE)
+            activity_match = re.search(
+                r"^- Current activity:\s*(.+)$",
+                root_content,
+                flags=re.MULTILINE,
+            )
             if activity_match:
                 self.current_step = activity_match.group(1).strip()
 
-            completed = re.findall(r"^- \[x\]", content, flags=re.MULTILINE)
-            remaining = re.findall(r"^- \[ \]", content, flags=re.MULTILINE)
+            completed = re.findall(r"^- \[x\]", root_content, flags=re.MULTILINE)
+            remaining = re.findall(r"^- \[ \]", root_content, flags=re.MULTILINE)
             self.plan_completed = len(completed)
             self.plan_total = len(completed) + len(remaining)
+
+            self._update_plan_markdown(force=False)
 
         def refresh_git_activity(self) -> None:
             table = self.query_one("#git_activity", DataTable)
@@ -741,11 +885,13 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                         "progress",
                         f"{stage_labels.get(snapshot.stage, snapshot.stage)} — {snapshot.detail}",
                     )
-                    commentary_text = marvin_commentary_from_progress(snapshot)
+                    cycle = self.commentary_cycle_index.get(snapshot.stage, 0)
+                    commentary_text = marvin_commentary_from_progress(snapshot, cycle)
                     key = (snapshot.stage, snapshot.detail)
                     if key != self.last_commentary_key:
                         commentary.write(commentary_text)
                         self.last_commentary_key = key
+                        self.commentary_cycle_index[snapshot.stage] = cycle + 1
                         try:
                             commentary.scroll_end(animate=False)
                         except Exception:

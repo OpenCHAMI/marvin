@@ -1,0 +1,70 @@
+project: OpenCHAMI boot-service
+problem: |
+  Implement OpenCHAMI/boot-service issue #6: inject cloud-init networking
+  (`network-config`) from SMD EthernetInterfaces.
+
+  Feature intent:
+  - Build cloud-init network-config v2 content from EthernetInterfaces in SMD.
+  - Base64-encode the rendered network config.
+  - Inject that value as the `network-config` kernel argument used by cloud-init.
+  - Preserve current boot behavior when EthernetInterfaces data is absent or invalid.
+
+mode: plan_and_execute
+
+repos:
+  - name: boot-service
+    url: https://github.com/OpenCHAMI/boot-service.git
+    branch: main
+    checkout: true
+    language: go
+    description: OpenCHAMI boot-service repository
+    checks:
+      - go test ./...
+      - go test ./... -race
+
+models:
+  default: openai:gpt-5.4
+
+task:
+  context_claim_name: project_accounting_context
+  execute_after_plan: true
+  confirm_before_execute: true
+  confirm_timeout_sec: 45
+
+  deliverables:
+    - Implement conversion from SMD EthernetInterfaces to cloud-init network-config v2.
+    - Encode network-config as base64 and inject as kernel arg (`network-config=<base64>`).
+    - Add or update unit tests for translation, encoding, and kernel-arg injection behavior.
+    - Add/adjust integration or handler tests covering presence/absence of EthernetInterfaces.
+    - Update relevant docs/README with behavior and examples.
+
+  plan_requirements:
+    - Identify exact code path where kernel args are assembled and where SMD data is read.
+    - Keep implementation incremental and safe; preserve existing behavior by default.
+    - Include explicit validation commands for each step.
+    - Call out any assumptions about EthernetInterfaces schema.
+
+  execution_requirements:
+    - Keep changes minimal and focused on issue #6.
+    - Handle malformed interface data defensively; do not panic.
+    - Ensure deterministic/stable output for generated network-config content.
+    - Run tests after each meaningful change and report results.
+
+  notes:
+    - "cloud-init network-config format reference: https://docs.cloud-init.io/en/23.2.2/reference/network-config-format-v2.html#network-config-v2"
+    - Prefer structured helper functions for translation and encoding to keep testing straightforward.
+
+execution:
+  max_parallel_checks: 2
+  max_check_retries: 1
+  skip_failed_repos: false
+  check_command_timeout_sec: 1800
+  check_output_tail_chars: 16000
+  resume_execution_state: true
+  verbose_io: false
+
+outputs:
+  proposal_markdown: docs/boot-service-issue-6-proposal.md
+  plan_json: artifacts/boot-service-issue-6-plan.json
+  summary_json: artifacts/boot-service-issue-6-summary.json
+  executor_progress_json: artifacts/boot-service-issue-6-progress.json

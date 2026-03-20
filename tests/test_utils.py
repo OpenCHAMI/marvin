@@ -1,4 +1,5 @@
 from openchami_coding_agent.utils import (
+    extract_brief_model_message,
     format_compact_count,
     format_elapsed_runtime,
     format_token_counts,
@@ -49,3 +50,19 @@ def test_format_elapsed_runtime_progression() -> None:
     assert format_elapsed_runtime(7.2) == "7s"
     assert format_elapsed_runtime(90.0) == "01:30"
     assert format_elapsed_runtime(3725.0) == "01:02"
+
+
+def test_extract_brief_model_message_uses_first_meaningful_line() -> None:
+    content = """
+    ## Step update
+    - Implemented network-config serialization.
+    - Added tests.
+    """
+    assert (
+        extract_brief_model_message(content, fallback="fallback")
+        == "Step update"
+    )
+
+
+def test_extract_brief_model_message_falls_back_when_empty() -> None:
+    assert extract_brief_model_message("   ", fallback="fallback") == "fallback"
