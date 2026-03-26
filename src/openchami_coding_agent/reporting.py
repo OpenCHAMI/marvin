@@ -65,7 +65,10 @@ class RichProgressReporter(ProgressReporter):
         table = Table(title=f"{AGENT_NAME} run progress", show_header=True)
         table.add_column("Workspace")
         table.add_column("Stage")
+        table.add_column("Step")
+        table.add_column("Repo")
         table.add_column("Detail")
+        table.add_column("Checkpoint")
         table.add_column("Repo Progress")
         table.add_column("Failures")
         table.add_column("Retries")
@@ -74,7 +77,10 @@ class RichProgressReporter(ProgressReporter):
         table.add_row(
             display.workspace,
             display.stage_label,
+            display.step_progress,
+            display.current_repo,
             display.detail,
+            display.checkpoint_label,
             display.repo_progress,
             display.failures,
             display.retries,
@@ -135,6 +141,13 @@ def render_run_progress(
     *,
     stage: str,
     detail: str,
+    planning_mode: str = "single",
+    current_main_step: int | None = None,
+    current_main_total: int = 0,
+    current_sub_step: int | None = None,
+    current_sub_total: int = 0,
+    current_repo: str | None = None,
+    checkpoint_label: str | None = None,
     token_usage: dict[str, int] | None = None,
     completed_repos: int = 0,
     total_repos: int = 0,
@@ -146,6 +159,13 @@ def render_run_progress(
         stage=stage,
         detail=detail,
         workspace=_WORKSPACE_NAME,
+        planning_mode=planning_mode,
+        current_main_step=current_main_step,
+        current_main_total=current_main_total,
+        current_sub_step=current_sub_step,
+        current_sub_total=current_sub_total,
+        current_repo=current_repo,
+        checkpoint_label=checkpoint_label,
         token_usage=token_usage or {},
         completed_repos=completed_repos,
         total_repos=total_repos,
@@ -165,6 +185,13 @@ def progress_heartbeat(
     *,
     stage: str,
     detail: str,
+    planning_mode: str = "single",
+    current_main_step: int | None = None,
+    current_main_total: int = 0,
+    current_sub_step: int | None = None,
+    current_sub_total: int = 0,
+    current_repo: str | None = None,
+    checkpoint_label: str | None = None,
     detail_provider: Callable[[], str] | None = None,
     token_usage_provider: Callable[[], dict[str, int] | dict[str, Any]] | None = None,
     completed_repos_provider: Callable[[], int] | None = None,
@@ -210,6 +237,13 @@ def progress_heartbeat(
         render_run_progress(
             stage=stage,
             detail=current_detail,
+            planning_mode=planning_mode,
+            current_main_step=current_main_step,
+            current_main_total=current_main_total,
+            current_sub_step=current_sub_step,
+            current_sub_total=current_sub_total,
+            current_repo=current_repo,
+            checkpoint_label=checkpoint_label,
             token_usage=_tokens(),
             completed_repos=_value(completed_repos_provider),
             total_repos=_value(total_repos_provider),

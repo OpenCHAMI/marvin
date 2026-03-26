@@ -17,11 +17,13 @@ from .plan_tracking import (
     extract_plan_steps,
     plan_step_names,
     read_tracker_activity,
+    structured_plan_from_agent_response,
+    structured_plan_from_data,
     update_tracker_markdown,
 )
-from .prompts import build_executor_prompt, build_repo_fix_prompt
+from .prompts import build_executor_prompt, build_repo_fix_prompt, build_subplanner_prompt
 from .reporting import emit_panel, progress_heartbeat, render_check_status, render_run_progress
-from .ursa_compat import get_agent_class, hash_plan, instantiate_agent
+from .ursa_compat import get_agent_class, hash_plan, instantiate_agent, snapshot_sqlite_db
 from .utils import (
     extract_agent_status_message,
     extract_agent_tokens,
@@ -413,11 +415,147 @@ def select_execution_agent_class(cfg: AgentConfig) -> type[Any]:
     )
 
 
+def step_to_text(step: PlanStep | str) -> str:
+    if isinstance(step, PlanStep):
+        description = step.description.strip()
+        return f"{step.name}\n{description}" if description else step.name
+    return str(step)
+
+
+def _materialize_plan_steps(
+    plan_steps: list[str],
+    structured_plan: list[PlanStep] | None,
+) -> list[PlanStep]:
+    if structured_plan:
+        return list(structured_plan)
+    return [PlanStep(name=step) for step in plan_steps]
+
+
+def _initial_hierarchical_progress() -> dict[str, Any]:
+    return {"main_next_index": 0, "subplans": {}}
+
+
+def _load_hierarchical_progress(progress: dict[str, Any], plan_hash: str) -> dict[str, Any]:
+    if progress.get("planning_mode") != "hierarchical":
+        return _initial_hierarchical_progress()
+    if progress.get("plan_hash") != plan_hash:
+        return _initial_hierarchical_progress()
+    subplans = progress.get("subplans") if isinstance(progress.get("subplans"), dict) else {}
+    return {
+        "main_next_index": max(0, int(progress.get("main_next_index", 0) or 0)),
+        "subplans": dict(subplans),
+    }
+
+
+def _subplan_entry_steps(entry: dict[str, Any]) -> list[PlanStep]:
+    return structured_plan_from_data(entry.get("steps") or []).steps
+
+
+def _save_executor_snapshot(
+    executor_db: Any,
+    workspace: Any,
+    *,
+    main_step: int,
+    sub_step: int | None = None,
+) -> None:
+    filename = (
+        f"executor_checkpoint_{main_step}_{sub_step}.db"
+        if sub_step is not None
+        else f"executor_checkpoint_{main_step}.db"
+    )
+    snapshot_sqlite_db(executor_db, checkpoint_dir(workspace) / filename)
+
+
+def _generate_subplan(
+    *,
+    cfg: AgentConfig,
+    planner: Any,
+    main_step: PlanStep,
+    main_step_index: int,
+    total_main_steps: int,
+    token_usage: dict[str, int],
+    verbose_io: bool,
+    started: float,
+) -> tuple[list[PlanStep], dict[str, int]]:
+    planning_activity = (
+        f"Planning sub-steps for main step {main_step_index}/{total_main_steps}: "
+        f"{main_step.name}"
+    )
+
+    def subplanning_detail_provider() -> str:
+        model_status = extract_agent_status_message(planner, fallback="")
+        if model_status:
+            return model_status
+        return planning_activity
+
+    with progress_heartbeat(
+        stage="planning",
+        detail=planning_activity,
+        planning_mode=cfg.planning_mode,
+        current_main_step=main_step_index,
+        current_main_total=total_main_steps,
+        detail_provider=subplanning_detail_provider,
+        token_usage_provider=lambda: merge_tokens(token_usage, extract_agent_tokens(planner)),
+        total_repos_provider=lambda: len(cfg.repos),
+        start_time=started,
+        interval_sec=2.0,
+    ):
+        invocation = invoke_agent(
+            planner,
+            build_subplanner_prompt(
+                cfg,
+                main_step=main_step,
+                main_step_index=main_step_index,
+                total_main_steps=total_main_steps,
+            ),
+            verbose_io,
+        )
+
+    normalized = structured_plan_from_agent_response(
+        invocation.raw_response,
+        fallback_markdown=invocation.content,
+        source="subplanner",
+    )
+    substeps = normalized.steps or [main_step]
+    return substeps, merge_tokens(token_usage, extract_agent_tokens(planner))
+
+
+def _build_progress_payload(
+    *,
+    cfg: AgentConfig,
+    plan_sig: str,
+    summary: str,
+    next_step_index: int,
+    token_usage: dict[str, int],
+    completed_repos: list[str],
+    failed_repos: list[str],
+    hierarchical_progress: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "plan_hash": plan_sig,
+        "planning_mode": cfg.planning_mode,
+        "summary": summary,
+        "completed_repos": completed_repos,
+        "failed_repos": failed_repos,
+        "token_usage": token_usage,
+    }
+    if cfg.planning_mode == "hierarchical":
+        payload["main_next_index"] = next_step_index
+        payload["subplans"] = dict((hierarchical_progress or {}).get("subplans") or {})
+    else:
+        payload["next_index"] = next_step_index
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 def execute_plan(
     cfg: AgentConfig,
     plan_markdown: str,
     executor_llm: Any,
     *,
+    planner_llm: Any | None = None,
     structured_plan: list[PlanStep] | None = None,
 ) -> dict[str, Any]:
     workspace = cfg.workspace
@@ -447,13 +585,19 @@ def execute_plan(
     plan_hash_source = [step.to_payload() for step in (structured_plan or [])] or [plan_markdown]
     plan_sig = hash_plan(plan_hash_source)
     plan_steps = plan_step_names(structured_plan) or extract_plan_steps(plan_markdown)
+    materialized_steps = _materialize_plan_steps(plan_steps, structured_plan)
     progress = load_exec_progress(workspace, cfg.executor_progress_json)
     plan_hash_matches = progress.get("plan_hash") == plan_sig
-    next_step_index = (
-        normalize_next_step_index(progress.get("next_index"), len(plan_steps))
-        if (cfg.resume_execution_state and plan_hash_matches)
-        else 0
-    )
+    hierarchical_progress = _initial_hierarchical_progress()
+    if cfg.planning_mode == "hierarchical" and cfg.resume_execution_state and plan_hash_matches:
+        hierarchical_progress = _load_hierarchical_progress(progress, plan_sig)
+        next_step_index = int(hierarchical_progress.get("main_next_index", 0) or 0)
+    else:
+        next_step_index = (
+            normalize_next_step_index(progress.get("next_index"), len(plan_steps))
+            if (cfg.resume_execution_state and plan_hash_matches)
+            else 0
+        )
 
     summary: str
     token_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
@@ -468,15 +612,225 @@ def execute_plan(
             "total_tokens": int((progress.get("token_usage") or {}).get("total_tokens", 0)),
         }
         emit_panel(
-            f"Resuming execution state at plan step index {next_step_index}",
+            (
+                f"Resuming hierarchical execution at main step index {next_step_index}"
+                if cfg.planning_mode == "hierarchical"
+                else f"Resuming execution state at plan step index {next_step_index}"
+            ),
             border_style="blue",
         )
 
     base_executor_prompt = build_executor_prompt(cfg, plan_markdown)
+    planner_conn: sqlite3.Connection | None = None
+    planner: Any | None = None
 
-    if plan_steps:
+    if plan_steps and cfg.planning_mode == "hierarchical":
+        planning_agent_class = get_agent_class("PlanningAgent")
+        planner_db = checkpoint_dir(workspace) / "planner_execution_checkpoint.db"
+        planner_conn = sqlite3.connect(str(planner_db), check_same_thread=False)
+        planner_checkpointer = SqliteSaver(planner_conn)
+        planner = instantiate_agent(
+            planning_agent_class,
+            llm=planner_llm or executor_llm,
+            checkpointer=planner_checkpointer,
+            enable_metrics=True,
+            metrics_dir="ursa_metrics",
+            thread_id=f"{thread_id}::detail",
+            workspace=str(workspace),
+        )
+
+    if plan_steps and cfg.planning_mode == "hierarchical":
+        subplans = hierarchical_progress.setdefault("subplans", {})
+        for main_index in range(next_step_index, len(materialized_steps)):
+            main_step = materialized_steps[main_index]
+            completed_main_steps = set(range(main_index))
+            sub_entry = dict(subplans.get(str(main_index)) or {})
+            sub_steps = _subplan_entry_steps(sub_entry)
+            if not sub_steps:
+                update_tracker_markdown(
+                    workspace=workspace,
+                    stage="planning",
+                    activity=(
+                        "Planning sub-steps for main step "
+                        f"{main_index + 1}/{len(materialized_steps)}: "
+                        f"{main_step.name}"
+                    ),
+                    plan_steps=plan_steps,
+                    completed_step_indices=completed_main_steps,
+                    notes=[f"Generating sub-plan for main step {main_index + 1}."],
+                    reconciliation="Hierarchical planning in progress.",
+                )
+                if planner is None:
+                    raise RuntimeError("Hierarchical planning requested without a planner agent.")
+                sub_steps, token_usage = _generate_subplan(
+                    cfg=cfg,
+                    planner=planner,
+                    main_step=main_step,
+                    main_step_index=main_index + 1,
+                    total_main_steps=len(materialized_steps),
+                    token_usage=token_usage,
+                    verbose_io=cfg.verbose_io,
+                    started=started,
+                )
+                sub_entry = {
+                    "steps": [step.to_payload() for step in sub_steps],
+                    "plan_hash": hash_plan([step.to_payload() for step in sub_steps]),
+                    "next_index": 0,
+                    "last_summary": "Start sub-steps.",
+                }
+                subplans[str(main_index)] = sub_entry
+
+            sub_next_index = int(sub_entry.get("next_index", 0) or 0)
+            previous_summary = str(sub_entry.get("last_summary") or "Start sub-steps.")
+            for sub_index in range(sub_next_index, len(sub_steps)):
+                sub_step = sub_steps[sub_index]
+                execution_activity = (
+                    f"Executing main step {main_index + 1}/{len(materialized_steps)} "
+                    f"sub-step {sub_index + 1}/{len(sub_steps)}: {sub_step.name}"
+                )
+                update_tracker_markdown(
+                    workspace=workspace,
+                    stage="execution",
+                    activity=execution_activity,
+                    plan_steps=plan_steps,
+                    completed_step_indices=completed_main_steps,
+                    notes=[
+                        f"Main step {main_index + 1}: {main_step.name}",
+                        f"Starting sub-step {sub_index + 1}: {sub_step.name}",
+                    ],
+                    reconciliation="Hierarchical execution in progress.",
+                )
+
+                step_prompt = (
+                    f"{base_executor_prompt}\n\n"
+                    "Execution control:\n"
+                    f"- Current main step: {step_to_text(main_step)}\n"
+                    f"- Execute ONLY this sub-step now: {sub_index + 1}/{len(sub_steps)}\n"
+                    f"- Current sub-step detail: {step_to_text(sub_step)}\n"
+                    f"- Previous sub-step summary: {previous_summary}\n"
+                    "- Do not start later main steps or later sub-steps in this invocation.\n"
+                    "- Return a concise summary of changes made for this sub-step."
+                )
+
+                current_activity = execution_activity
+                step_base_tokens = token_usage.copy()
+
+                def step_execution_detail_provider(activity: str = current_activity) -> str:
+                    model_status = extract_agent_status_message(executor, fallback="")
+                    if model_status:
+                        return model_status
+                    tracker_detail = read_tracker_activity(workspace)
+                    return tracker_detail or activity
+
+                def step_token_usage_provider(
+                    base_tokens: dict[str, int] = step_base_tokens,
+                ) -> dict[str, int]:
+                    return merge_tokens(base_tokens, extract_agent_tokens(executor))
+
+                with progress_heartbeat(
+                    stage="execution",
+                    detail=execution_activity,
+                    planning_mode=cfg.planning_mode,
+                    current_main_step=main_index + 1,
+                    current_main_total=len(materialized_steps),
+                    current_sub_step=sub_index + 1,
+                    current_sub_total=len(sub_steps),
+                    detail_provider=step_execution_detail_provider,
+                    token_usage_provider=step_token_usage_provider,
+                    total_repos_provider=lambda: len(cfg.repos),
+                    start_time=started,
+                    interval_sec=2.0,
+                ):
+                    invocation = invoke_agent(executor, step_prompt, cfg.verbose_io)
+
+                step_summary = invocation.content.strip()
+                step_status = extract_brief_model_message(
+                    step_summary,
+                    fallback=(
+                        f"Completed main step {main_index + 1}/{len(materialized_steps)} "
+                        f"sub-step {sub_index + 1}/{len(sub_steps)}."
+                    ),
+                )
+                committed_repos = commit_step_changes(
+                    cfg,
+                    step_index=sub_index,
+                    total_steps=len(sub_steps),
+                    step_text=sub_step.name,
+                    step_status=step_status,
+                )
+                summary = (
+                    f"{summary}\n\n---\n"
+                    f"Main {main_index + 1}/{len(materialized_steps)} "
+                    f"Sub {sub_index + 1}/{len(sub_steps)}\n"
+                    f"{step_summary}"
+                ).strip()
+                token_usage = merge_tokens(token_usage, extract_agent_tokens(executor))
+                sub_entry["next_index"] = sub_index + 1
+                sub_entry["last_summary"] = step_summary
+                subplans[str(main_index)] = sub_entry
+                _save_executor_snapshot(
+                    executor_db,
+                    workspace,
+                    main_step=main_index + 1,
+                    sub_step=sub_index + 1,
+                )
+                save_exec_progress(
+                    workspace,
+                    cfg.executor_progress_json,
+                    {
+                        "plan_hash": plan_sig,
+                        "planning_mode": "hierarchical",
+                        "summary": summary,
+                        "main_next_index": main_index,
+                        "subplans": subplans,
+                        "completed_repos": sorted(progress.get("completed_repos") or []),
+                        "failed_repos": sorted(progress.get("failed_repos") or []),
+                        "token_usage": token_usage,
+                    },
+                )
+                update_tracker_markdown(
+                    workspace=workspace,
+                    stage="execution",
+                    activity=(
+                        f"Main step {main_index + 1}/{len(materialized_steps)} "
+                        f"sub-step {sub_index + 1}/{len(sub_steps)} update: {step_status}"
+                    ),
+                    plan_steps=plan_steps,
+                    completed_step_indices=completed_main_steps,
+                    notes=[
+                        f"Main step {main_index + 1}: {main_step.name}",
+                        f"Sub-step {sub_index + 1} finished.",
+                        (
+                            "Step commit(s): "
+                            f"{', '.join(committed_repos)}"
+                            if committed_repos
+                            else "Step commit(s): none"
+                        ),
+                    ],
+                    reconciliation="Hierarchical execution advancing in order.",
+                )
+                previous_summary = step_summary
+
+            hierarchical_progress["main_next_index"] = main_index + 1
+            next_step_index = main_index + 1
+            save_exec_progress(
+                workspace,
+                cfg.executor_progress_json,
+                {
+                    "plan_hash": plan_sig,
+                    "planning_mode": "hierarchical",
+                    "summary": summary,
+                    "main_next_index": next_step_index,
+                    "subplans": subplans,
+                    "completed_repos": sorted(progress.get("completed_repos") or []),
+                    "failed_repos": sorted(progress.get("failed_repos") or []),
+                    "token_usage": token_usage,
+                },
+            )
+    elif plan_steps:
         for step_index in range(next_step_index, len(plan_steps)):
-            step_text = plan_steps[step_index]
+            step = materialized_steps[step_index]
+            step_text = step.name
             execution_activity = f"Executing step {step_index + 1}/{len(plan_steps)}: {step_text}"
             update_tracker_markdown(
                 workspace=workspace,
@@ -492,7 +846,7 @@ def execute_plan(
                 f"{base_executor_prompt}\n\n"
                 "Execution control:\n"
                 f"- Execute ONLY this step now: {step_index + 1}/{len(plan_steps)}\n"
-                f"- Step detail: {step_text}\n"
+                f"- Step detail: {step_to_text(step)}\n"
                 "- Do not start later steps in this invocation.\n"
                 "- Return a concise summary of changes made for this step."
             )
@@ -542,11 +896,13 @@ def execute_plan(
             ).strip()
             token_usage = merge_tokens(token_usage, extract_agent_tokens(executor))
             next_step_index = step_index + 1
+            _save_executor_snapshot(executor_db, workspace, main_step=step_index + 1)
             save_exec_progress(
                 workspace,
                 cfg.executor_progress_json,
                 {
                     "plan_hash": plan_sig,
+                    "planning_mode": "single",
                     "summary": summary,
                     "next_index": next_step_index,
                     "completed_repos": sorted(progress.get("completed_repos") or []),
@@ -626,6 +982,7 @@ def execute_plan(
             cfg.executor_progress_json,
             {
                 "plan_hash": plan_sig,
+                "planning_mode": cfg.planning_mode,
                 "summary": summary,
                 "next_index": 0,
                 "completed_repos": sorted(progress.get("completed_repos") or []),
@@ -633,6 +990,9 @@ def execute_plan(
                 "token_usage": token_usage,
             },
         )
+
+    if planner_conn is not None:
+        planner_conn.close()
 
     ordered_repos = resolve_repo_execution_order(cfg, plan_markdown)
     checks: dict[str, list[dict[str, Any]]] = {}
@@ -663,7 +1023,7 @@ def execute_plan(
         stage="execution",
         activity="Executor pass complete; starting repository validation.",
         plan_steps=plan_steps,
-        completed_step_indices=_completed_step_indices_from_checkpoint(workspace, plan_steps),
+        completed_step_indices=set(range(next_step_index)),
         notes=["Validation started for repository checks."],
         reconciliation=_reconciliation_summary(
             ordered_repos=ordered_repos,
@@ -675,6 +1035,9 @@ def execute_plan(
     render_run_progress(
         stage="validation",
         detail="Repository checks starting",
+        planning_mode=cfg.planning_mode,
+        current_main_step=next_step_index if next_step_index else None,
+        current_main_total=len(plan_steps),
         token_usage=token_usage,
         completed_repos=len(completed_repos),
         total_repos=len(repos_with_checks),
@@ -691,6 +1054,9 @@ def execute_plan(
         render_run_progress(
             stage="validation",
             detail=f"Check attempt {attempt + 1}/{cfg.max_check_retries + 1}",
+            planning_mode=cfg.planning_mode,
+            current_main_step=next_step_index if next_step_index else None,
+            current_main_total=len(plan_steps),
             token_usage=token_usage,
             completed_repos=len(completed_repos),
             total_repos=len(repos_with_checks),
@@ -725,7 +1091,7 @@ def execute_plan(
             stage="validation",
             activity=validation_activity,
             plan_steps=plan_steps,
-            completed_step_indices=_completed_step_indices_from_checkpoint(workspace, plan_steps),
+            completed_step_indices=set(range(next_step_index)),
             notes=[f"Validation attempt {attempt + 1} started."],
             reconciliation=_reconciliation_summary(
                 ordered_repos=ordered_repos,
@@ -737,6 +1103,10 @@ def execute_plan(
         with progress_heartbeat(
             stage="validation",
             detail=f"Running checks (attempt {attempt + 1}/{cfg.max_check_retries + 1})",
+            planning_mode=cfg.planning_mode,
+            current_main_step=next_step_index if next_step_index else None,
+            current_main_total=len(plan_steps),
+            current_repo=", ".join(checking_repos) if checking_repos else None,
             detail_provider=validation_detail_provider,
             token_usage_provider=validation_token_usage_provider,
             completed_repos_provider=lambda: len(completed_repos),
@@ -762,15 +1132,17 @@ def execute_plan(
         save_exec_progress(
             workspace,
             cfg.executor_progress_json,
-            {
-                "plan_hash": plan_sig,
-                "summary": summary,
-                "next_index": next_step_index,
-                "completed_repos": sorted(completed_repos),
-                "failed_repos": sorted(failed_repos),
-                "token_usage": token_usage,
-                "last_check_attempt": attempt,
-            },
+            _build_progress_payload(
+                cfg=cfg,
+                plan_sig=plan_sig,
+                summary=summary,
+                next_step_index=next_step_index,
+                token_usage=token_usage,
+                completed_repos=sorted(completed_repos),
+                failed_repos=sorted(failed_repos),
+                hierarchical_progress=hierarchical_progress,
+                extra={"last_check_attempt": attempt},
+            ),
         )
         render_check_status(repo_status, repo_retries)
         update_tracker_markdown(
@@ -778,7 +1150,7 @@ def execute_plan(
             stage="validation",
             activity=f"Validation attempt {attempt + 1} completed.",
             plan_steps=plan_steps,
-            completed_step_indices=_completed_step_indices_from_checkpoint(workspace, plan_steps),
+            completed_step_indices=set(range(next_step_index)),
             notes=[
                 f"Check attempt {attempt + 1}/{cfg.max_check_retries + 1} finished.",
                 f"Completed repos: {', '.join(sorted(completed_repos)) or '-'}",
@@ -835,9 +1207,7 @@ def execute_plan(
                 stage="repair",
                 activity=repair_activity,
                 plan_steps=plan_steps,
-                completed_step_indices=_completed_step_indices_from_checkpoint(
-                    workspace, plan_steps
-                ),
+                completed_step_indices=set(range(next_step_index)),
                 notes=[f"Repair attempt started for {repo.name}."],
                 reconciliation=_reconciliation_summary(
                     ordered_repos=ordered_repos,
@@ -852,6 +1222,10 @@ def execute_plan(
                     f"Auto-repair in progress for {repo.name} "
                     f"(attempt {attempt + 1}/{cfg.max_check_retries})"
                 ),
+                planning_mode=cfg.planning_mode,
+                current_main_step=next_step_index if next_step_index else None,
+                current_main_total=len(plan_steps),
+                current_repo=repo.name,
                 detail_provider=detail_provider,
                 token_usage_provider=token_usage_provider,
                 completed_repos_provider=lambda: len(completed_repos),
@@ -875,24 +1249,24 @@ def execute_plan(
             save_exec_progress(
                 workspace,
                 cfg.executor_progress_json,
-                {
-                    "plan_hash": plan_sig,
-                    "summary": summary,
-                    "next_index": next_step_index,
-                    "completed_repos": sorted(completed_repos),
-                    "failed_repos": sorted(failed_repos),
-                    "token_usage": token_usage,
-                    "last_check_attempt": attempt,
-                },
+                _build_progress_payload(
+                    cfg=cfg,
+                    plan_sig=plan_sig,
+                    summary=summary,
+                    next_step_index=next_step_index,
+                    token_usage=token_usage,
+                    completed_repos=sorted(completed_repos),
+                    failed_repos=sorted(failed_repos),
+                    hierarchical_progress=hierarchical_progress,
+                    extra={"last_check_attempt": attempt},
+                ),
             )
             update_tracker_markdown(
                 workspace=workspace,
                 stage="repair",
                 activity=f"Repair update for {repo.name}: {fix_status}",
                 plan_steps=plan_steps,
-                completed_step_indices=_completed_step_indices_from_checkpoint(
-                    workspace, plan_steps
-                ),
+                completed_step_indices=set(range(next_step_index)),
                 notes=[f"Repair summary appended for {repo.name}."],
                 reconciliation=_reconciliation_summary(
                     ordered_repos=ordered_repos,
@@ -907,21 +1281,28 @@ def execute_plan(
     save_exec_progress(
         workspace,
         cfg.executor_progress_json,
-        {
-            "plan_hash": plan_sig,
-            "summary": summary,
-            "next_index": next_step_index,
-            "completed_repos": sorted(completed_repos),
-            "failed_repos": sorted(failed_repos),
-            "token_usage": token_usage,
-            "all_checks_passed": all_checks_passed,
-            "duration_sec": duration_sec,
-        },
+        _build_progress_payload(
+            cfg=cfg,
+            plan_sig=plan_sig,
+            summary=summary,
+            next_step_index=next_step_index,
+            token_usage=token_usage,
+            completed_repos=sorted(completed_repos),
+            failed_repos=sorted(failed_repos),
+            hierarchical_progress=hierarchical_progress,
+            extra={
+                "all_checks_passed": all_checks_passed,
+                "duration_sec": duration_sec,
+            },
+        ),
     )
 
     render_run_progress(
         stage="complete",
         detail="Execution finished",
+        planning_mode=cfg.planning_mode,
+        current_main_step=next_step_index if next_step_index else None,
+        current_main_total=len(plan_steps),
         token_usage=token_usage,
         completed_repos=len(completed_repos),
         total_repos=len(repos_with_checks),
@@ -940,7 +1321,7 @@ def execute_plan(
             else "Execution finished with unresolved check failures."
         ),
         plan_steps=plan_steps,
-        completed_step_indices=_completed_step_indices_from_checkpoint(workspace, plan_steps),
+        completed_step_indices=set(range(next_step_index)),
         notes=[
             f"Duration: {duration_sec}s",
             (
@@ -960,6 +1341,7 @@ def execute_plan(
     payload = {
         "project": cfg.project,
         "workspace": str(cfg.workspace),
+        "planning_mode": cfg.planning_mode,
         "plan_hash": plan_sig,
         "summary": summary,
         "checks": checks,

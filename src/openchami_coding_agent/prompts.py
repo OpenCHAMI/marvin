@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .config import default_working_directory, repo_listing
-from .models import AgentConfig, RepoSpec
+from .models import AgentConfig, PlanStep, RepoSpec
 
 
 def _append_instruction_section(prompt: str, title: str, text: str) -> str:
@@ -180,3 +180,44 @@ Execution rules:
         "Executor-specific agent instructions",
         cfg.executor_prompt_appendix,
     )
+
+
+def build_subplanner_prompt(
+    cfg: AgentConfig,
+    *,
+    main_step: PlanStep,
+    main_step_index: int,
+    total_main_steps: int,
+) -> str:
+    workspace = str(cfg.workspace) if cfg.workspace else "<workspace-not-set>"
+    workdir = str(default_working_directory(cfg) or workspace)
+    return f"""
+You are {cfg.agent_name}, expanding one approved main implementation step into executable sub-steps.
+
+Persona guidance:
+- {cfg.persona_instruction}
+
+Workspace root (hard containment):
+{workspace}
+
+Default shell working directory:
+{workdir}
+
+Overall project:
+- project: {cfg.project}
+- problem: {cfg.problem}
+
+Current main step to expand:
+- index: {main_step_index}/{total_main_steps}
+- name: {main_step.name}
+- description: {main_step.description or '<none>'}
+
+Requirements:
+1. Produce only the sub-steps needed to complete this main step.
+2. Keep sub-steps concrete, sequential, and independently executable.
+3. Do not include work from earlier or later main steps.
+4. Each sub-step must include `name`, `description`, `expected_outputs`,
+   `success_criteria`, and `requires_code`.
+5. Prefer the smallest useful set of sub-steps over broad bundled work.
+6. If this main step is already atomic, return exactly one sub-step that matches it closely.
+""".strip()

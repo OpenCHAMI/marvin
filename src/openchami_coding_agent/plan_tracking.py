@@ -96,6 +96,24 @@ def structured_plan_from_markdown(
     )
 
 
+def structured_plan_from_agent_response(
+    response: object,
+    *,
+    fallback_markdown: str | None = None,
+    source: str = "planner",
+) -> StructuredPlan:
+    if isinstance(response, dict):
+        plan_obj = response.get("plan")
+        raw_steps = getattr(plan_obj, "steps", None)
+        structured = structured_plan_from_data(raw_steps, source=source)
+        if structured.steps:
+            return structured
+
+    if fallback_markdown:
+        return structured_plan_from_markdown(fallback_markdown)
+    return StructuredPlan(source=source)
+
+
 def _extract_plan_steps_from_json(raw_text: str) -> list[str]:
     candidate_texts: list[str] = []
     stripped = raw_text.strip()

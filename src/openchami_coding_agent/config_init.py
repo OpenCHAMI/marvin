@@ -56,6 +56,7 @@ class ConfigInitSpec:
     deliverables: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     model: str = DEFAULT_MODEL
+    planning_mode: str = "single"
     execute_after_plan: bool = True
     confirm_before_execute: bool = True
     confirm_timeout_sec: int = 45
@@ -738,6 +739,7 @@ def build_config_payload(spec: ConfigInitSpec) -> dict[str, Any]:
         "project": spec.project,
         "problem": spec.problem,
         "mode": "plan_and_execute",
+        "planning": {"mode": spec.planning_mode},
         "repos": [_build_repo_dict(repo) for repo in spec.repos],
         "models": {"default": spec.model},
         "task": {
@@ -906,6 +908,13 @@ def collect_config_spec(
         output=output,
         default=DEFAULT_MODEL,
     )
+    planning_mode = _prompt_choice(
+        "Planning mode",
+        choices=("single", "hierarchical"),
+        input_func=input_func,
+        output=output,
+        default="single",
+    )
     execute_after_plan = _prompt_bool(
         "Execute automatically after planning",
         input_func=input_func,
@@ -946,6 +955,7 @@ def collect_config_spec(
         deliverables=deliverables,
         notes=notes,
         model=model,
+        planning_mode=planning_mode,
         execute_after_plan=execute_after_plan,
         confirm_before_execute=confirm_before_execute,
         commit_each_step=commit_each_step,

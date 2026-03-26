@@ -8,6 +8,7 @@ from openchami_coding_agent.checkpoints import (
     parse_snapshot_indices,
     resolve_resume_checkpoint,
     restore_executor_from_snapshot,
+    sync_progress_for_snapshot_hierarchical,
     sync_progress_for_snapshot_single,
 )
 
@@ -90,3 +91,45 @@ def test_sync_progress_for_live_checkpoint_noop(tmp_path: Path) -> None:
     )
 
     assert not (tmp_path / "artifacts" / "openchami_executor_progress.json").exists()
+
+
+def test_sync_progress_for_snapshot_hierarchical_updates_substep_progress_json(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "executor_checkpoint_3_2.db"
+    snapshot.write_text("db", encoding="utf-8")
+
+    sync_progress_for_snapshot_hierarchical(
+        workspace=tmp_path,
+        snapshot=snapshot,
+        plan_hash="abc123",
+        progress_rel_path="artifacts/openchami_executor_progress.json",
+    )
+
+    payload = json.loads(
+        (tmp_path / "artifacts" / "openchami_executor_progress.json").read_text(encoding="utf-8")
+    )
+    assert payload["planning_mode"] == "hierarchical"
+    assert payload["plan_hash"] == "abc123"
+    assert payload["main_next_index"] == 2
+    assert payload["subplans"]["2"]["next_index"] == 2
+
+
+def test_sync_progress_for_snapshot_hierarchical_main_checkpoint_advances_main_index(
+    tmp_path: Path,
+) -> None:
+    snapshot = tmp_path / "executor_checkpoint_4.db"
+    snapshot.write_text("db", encoding="utf-8")
+
+    sync_progress_for_snapshot_hierarchical(
+        workspace=tmp_path,
+        snapshot=snapshot,
+        plan_hash="abc123",
+        progress_rel_path="artifacts/openchami_executor_progress.json",
+    )
+
+    payload = json.loads(
+        (tmp_path / "artifacts" / "openchami_executor_progress.json").read_text(encoding="utf-8")
+    )
+    assert payload["main_next_index"] == 4
+    assert payload["subplans"] == {}

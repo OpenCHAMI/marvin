@@ -32,6 +32,9 @@ class ProgressDisplay:
     stage: str
     stage_label: str
     detail: str
+    step_progress: str
+    current_repo: str
+    checkpoint_label: str
     repo_progress: str
     failures: str
     retries: str
@@ -51,7 +54,14 @@ def progress_snapshot_key(snapshot: ProgressSnapshot) -> tuple[Any, ...]:
     return (
         snapshot.workspace or "-",
         snapshot.stage,
+        snapshot.planning_mode,
         snapshot.detail,
+        snapshot.current_main_step,
+        snapshot.current_main_total,
+        snapshot.current_sub_step,
+        snapshot.current_sub_total,
+        snapshot.current_repo or "-",
+        snapshot.checkpoint_label or "-",
         snapshot.completed_repos,
         snapshot.total_repos,
         snapshot.failed_repos,
@@ -64,11 +74,22 @@ def progress_snapshot_key(snapshot: ProgressSnapshot) -> tuple[Any, ...]:
 
 
 def build_progress_display(snapshot: ProgressSnapshot) -> ProgressDisplay:
+    step_progress = "-"
+    if snapshot.current_main_step is not None and snapshot.current_main_total:
+        step_progress = f"main {snapshot.current_main_step}/{snapshot.current_main_total}"
+        if snapshot.current_sub_step is not None and snapshot.current_sub_total:
+            step_progress += (
+                f" | sub {snapshot.current_sub_step}/{snapshot.current_sub_total}"
+            )
+
     return ProgressDisplay(
         workspace=snapshot.workspace or "-",
         stage=snapshot.stage,
         stage_label=stage_label(snapshot.stage),
         detail=snapshot.detail,
+        step_progress=step_progress,
+        current_repo=snapshot.current_repo or "-",
+        checkpoint_label=snapshot.checkpoint_label or "-",
         repo_progress=f"{snapshot.completed_repos}/{snapshot.total_repos}",
         failures=str(snapshot.failed_repos),
         retries=str(snapshot.retries),

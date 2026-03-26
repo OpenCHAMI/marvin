@@ -22,7 +22,7 @@ from .constants import AGENT_NAME
 from .git_activity import collect_repo_git_activity
 from .models import AgentConfig, ProgressSnapshot
 from .pipeline import run_pipeline_with_reporter
-from .progress_view import repo_status_label, stage_label
+from .progress_view import build_progress_display, repo_status_label, stage_label
 from .reporting import ProgressReporter
 from .utils import format_compact_count, format_elapsed_runtime
 
@@ -407,6 +407,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             report.write("- Agent: " + AGENT_NAME)
             report.write("- Project: " + cfg.project)
             report.write("- Mode: " + cfg.mode)
+            report.write("- Planning mode: " + cfg.planning_mode)
             report.write("- Workspace: " + (str(cfg.workspace) if cfg.workspace else "<not set>"))
             report.write("- Planner model: " + (cfg.planner_model or "<not set>"))
             report.write("- Executor model: " + (cfg.executor_model or "<not set>"))
@@ -921,6 +922,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                         pass
                 elif kind == "progress":
                     snapshot: ProgressSnapshot = payload
+                    display = build_progress_display(snapshot)
                     self.last_progress_at = time.time()
                     self.last_stage = snapshot.stage
                     self.last_token_usage = snapshot.token_usage or {
@@ -928,7 +930,13 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                         "output_tokens": 0,
                         "total_tokens": 0,
                     }
-                    self.current_step = snapshot.detail or self.current_step
+                    focus_bits = [display.step_progress]
+                    if snapshot.current_repo:
+                        focus_bits.append(f"repo {snapshot.current_repo}")
+                    if snapshot.checkpoint_label:
+                        focus_bits.append(snapshot.checkpoint_label)
+                    focus_summary = " | ".join(bit for bit in focus_bits if bit and bit != "-")
+                    self.current_step = focus_summary or snapshot.detail or self.current_step
                     normalized_detail = normalize_progress_detail(snapshot.detail)
                     progress_key = (
                         snapshot.stage,
@@ -945,9 +953,15 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                         >= PROGRESS_REPEAT_COOLDOWN_SEC
                     )
                     if timeline_allowed:
+                        message = f"{stage_label(snapshot.stage)}"
+                        if display.step_progress != "-":
+                            message += f" [{display.step_progress}]"
+                        if snapshot.current_repo:
+                            message += f" [{snapshot.current_repo}]"
+                        message += f" — {snapshot.detail}"
                         self.add_event(
                             "progress",
-                            f"{stage_label(snapshot.stage)} — {snapshot.detail}",
+                            message,
                         )
                         self.last_timeline_seen_at[progress_key] = now_ts
                     self.last_timeline_progress_key = progress_key

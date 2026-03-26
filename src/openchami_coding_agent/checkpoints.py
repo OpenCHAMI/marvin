@@ -98,3 +98,34 @@ def sync_progress_for_snapshot_single(
         "last_summary": f"Resumed from snapshot {snapshot.name}",
     }
     progress_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def sync_progress_for_snapshot_hierarchical(
+    workspace: Path,
+    snapshot: Path,
+    plan_hash: str,
+    progress_rel_path: str,
+) -> None:
+    main_step, sub_step = parse_snapshot_indices(snapshot)
+    if not main_step:
+        return
+
+    progress_path = (workspace / progress_rel_path).resolve()
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload: dict[str, object] = {
+        "planning_mode": "hierarchical",
+        "plan_hash": str(plan_hash),
+        "main_next_index": int(main_step if sub_step is None else max(0, main_step - 1)),
+        "last_summary": f"Resumed from snapshot {snapshot.name}",
+        "subplans": {},
+    }
+    if sub_step is not None:
+        payload["subplans"] = {
+            str(max(0, main_step - 1)): {
+                "next_index": int(sub_step),
+                "last_summary": f"Resumed from snapshot {snapshot.name}",
+            }
+        }
+
+    progress_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

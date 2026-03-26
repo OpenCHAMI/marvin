@@ -224,6 +224,13 @@ class ProgressSnapshot:
     stage: str
     detail: str
     workspace: str | None = None
+    planning_mode: str = "single"
+    current_main_step: int | None = None
+    current_main_total: int = 0
+    current_sub_step: int | None = None
+    current_sub_total: int = 0
+    current_repo: str | None = None
+    checkpoint_label: str | None = None
     token_usage: dict[str, int] = field(default_factory=dict)
     completed_repos: int = 0
     total_repos: int = 0

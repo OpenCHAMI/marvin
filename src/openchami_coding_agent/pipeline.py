@@ -12,6 +12,7 @@ from .checkpoints import (
     checkpoint_dir,
     resolve_resume_checkpoint,
     restore_executor_from_snapshot,
+    sync_progress_for_snapshot_hierarchical,
     sync_progress_for_snapshot_single,
 )
 from .config import default_working_directory, ensure_repo, render_status
@@ -21,6 +22,7 @@ from .plan_tracking import (
     extract_plan_steps,
     initialize_plan_artifacts,
     plan_step_names,
+    structured_plan_from_agent_response,
     structured_plan_from_data,
     structured_plan_from_markdown,
     update_tracker_markdown,
@@ -61,17 +63,6 @@ def make_agent_llm(config: AgentConfig, role: str):
     role_cfg = (config.defaults or {}).copy()
     role_cfg.update((config.planner if role == "planner" else config.execution) or {})
     return setup_llm(model_name, role_cfg, agent_name=config.agent_name)
-
-
-def _structured_plan_from_invocation(invocation: Any) -> list[PlanStep]:
-    response = invocation.raw_response
-    if not isinstance(response, dict):
-        return []
-
-    plan_obj = response.get("plan")
-    raw_steps = getattr(plan_obj, "steps", None)
-    structured = structured_plan_from_data(raw_steps, source="planner")
-    return structured.steps
 
 
 def _load_structured_steps_from_plan_payload(workspace: Any, rel_path: str) -> list[PlanStep]:
@@ -127,12 +118,11 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
     ):
         invocation = invoke_agent(planner, prompt, cfg.verbose_io)
     plan_markdown = invocation.content
-    structured_plan = structured_plan_from_data(
-        _structured_plan_from_invocation(invocation),
+    structured_plan = structured_plan_from_agent_response(
+        invocation.raw_response,
+        fallback_markdown=plan_markdown,
         source="planner",
     )
-    if not structured_plan.steps:
-        structured_plan = structured_plan_from_markdown(plan_markdown)
     planner_message = extract_brief_model_message(
         plan_markdown,
         fallback="Plan generated.",
@@ -286,12 +276,20 @@ def run_pipeline(cfg: AgentConfig) -> int:
 
     if selected_resume_checkpoint is not None and cfg.mode in {"execute", "plan_and_execute"}:
         plan_sig = hash_plan([step.to_payload() for step in structured_steps] or [plan_markdown])
-        sync_progress_for_snapshot_single(
-            workspace,
-            selected_resume_checkpoint,
-            plan_sig,
-            cfg.executor_progress_json,
-        )
+        if cfg.planning_mode == "hierarchical":
+            sync_progress_for_snapshot_hierarchical(
+                workspace,
+                selected_resume_checkpoint,
+                plan_sig,
+                cfg.executor_progress_json,
+            )
+        else:
+            sync_progress_for_snapshot_single(
+                workspace,
+                selected_resume_checkpoint,
+                plan_sig,
+                cfg.executor_progress_json,
+            )
         emit_panel(
             (
                 f"Execution progress aligned from checkpoint: "
@@ -330,6 +328,7 @@ def run_pipeline(cfg: AgentConfig) -> int:
         cfg,
         plan_markdown,
         executor_llm=make_agent_llm(cfg, "executor"),
+        planner_llm=make_agent_llm(cfg, "planner"),
         structured_plan=structured_steps,
     )
     summary_path = write_json_file(workspace, cfg.summary_json, summary_payload)

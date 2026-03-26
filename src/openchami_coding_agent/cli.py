@@ -57,6 +57,11 @@ def build_run_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--planning-mode",
+        choices=["single", "hierarchical"],
+        help="Override the planning mode from the YAML config for this run.",
+    )
+    parser.add_argument(
         "--no-resume-state",
         action="store_true",
         help="Ignore saved execution progress state and start execution fresh.",
@@ -88,6 +93,8 @@ def run_with_config(args: argparse.Namespace) -> int:
         cfg.verbose_io = True
     if args.resume_from:
         cfg.resume_from = args.resume_from
+    if args.planning_mode:
+        cfg.planning_mode = args.planning_mode
 
     if args.tui:
         return run_textual_tui(cfg)

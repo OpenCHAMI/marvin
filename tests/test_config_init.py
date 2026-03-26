@@ -45,6 +45,7 @@ def test_build_config_payload_populates_defaults(tmp_path: Path) -> None:
     assert payload["repos"][0]["name"] == "boot-service"
     assert payload["repos"][0]["checkout"] is True
     assert payload["models"]["default"] == "openai:gpt-5.4"
+    assert payload["planning"]["mode"] == "single"
     assert payload["task"]["confirm_before_execute"] is True
     assert payload["execution"]["commit_each_step"] is True
     assert (
@@ -75,6 +76,7 @@ def test_run_init_command_writes_yaml(tmp_path: Path) -> None:
             ".",
             ".",
             "openai:gpt-5.4",
+            "hierarchical",
             "y",
             "y",
             "y",
@@ -97,6 +99,7 @@ def test_run_init_command_writes_yaml(tmp_path: Path) -> None:
 
     payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert payload["project"] == "OpenCHAMI boot-service"
+    assert payload["planning"]["mode"] == "hierarchical"
     assert payload["task"]["execute_after_plan"] is True
     assert payload["execution"]["commit_each_step"] is True
     assert payload["repos"][0]["checks"] == ["go test ./..."]
