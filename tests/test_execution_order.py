@@ -8,6 +8,7 @@ from openchami_coding_agent.execution import (
     normalize_next_step_index,
     resolve_repo_execution_order,
     select_execution_agent_class,
+    summarize_token_events,
     topological_order,
 )
 from openchami_coding_agent.models import AgentConfig, RepoSpec
@@ -141,3 +142,44 @@ def test_select_execution_agent_class_rejects_unknown_value() -> None:
     )
     with pytest.raises(ValueError, match="Unknown execution.executor_agent"):
         select_execution_agent_class(cfg)
+
+
+def test_summarize_token_events_aggregates_by_stage() -> None:
+    summary = summarize_token_events(
+        [
+            {
+                "stage": "execution",
+                "prompt_chars": 100,
+                "prompt_estimated_tokens": 25,
+                "input_tokens": 30,
+                "output_tokens": 10,
+                "total_tokens": 40,
+            },
+            {
+                "stage": "execution",
+                "prompt_chars": 60,
+                "prompt_estimated_tokens": 15,
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "total_tokens": 16,
+            },
+            {
+                "stage": "repair",
+                "prompt_chars": 80,
+                "prompt_estimated_tokens": 20,
+                "input_tokens": 14,
+                "output_tokens": 6,
+                "total_tokens": 20,
+            },
+        ]
+    )
+
+    assert summary["execution"] == {
+        "count": 2,
+        "prompt_chars": 160,
+        "prompt_estimated_tokens": 40,
+        "input_tokens": 42,
+        "output_tokens": 14,
+        "total_tokens": 56,
+    }
+    assert summary["repair"]["count"] == 1

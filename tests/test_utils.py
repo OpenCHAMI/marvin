@@ -1,10 +1,12 @@
 from openchami_coding_agent.utils import (
+    estimate_prompt_tokens,
     extract_brief_model_message,
     format_compact_count,
     format_elapsed_runtime,
     format_token_counts,
     merge_tokens,
     slugify,
+    token_delta,
     truncate_tail,
 )
 
@@ -26,6 +28,17 @@ def test_merge_tokens_sums_each_field() -> None:
         {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
         {"input_tokens": 4, "output_tokens": 5, "total_tokens": 9},
     ) == {"input_tokens": 5, "output_tokens": 7, "total_tokens": 12}
+
+
+def test_token_delta_returns_only_new_usage() -> None:
+    assert token_delta(
+        {"input_tokens": 4, "output_tokens": 5, "total_tokens": 9},
+        {"input_tokens": 10, "output_tokens": 8, "total_tokens": 18},
+    ) == {"input_tokens": 6, "output_tokens": 3, "total_tokens": 9}
+
+
+def test_estimate_prompt_tokens_uses_simple_character_ratio() -> None:
+    assert estimate_prompt_tokens("abcdefgh") == 2
 
 
 def test_format_token_counts_uses_sent_received_labels() -> None:

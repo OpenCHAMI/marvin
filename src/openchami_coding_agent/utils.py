@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import math
 import re
 import subprocess
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
@@ -129,6 +130,31 @@ def merge_tokens(base: dict[str, int], extra: dict[str, int]) -> dict[str, int]:
         "output_tokens": int(base.get("output_tokens", 0)) + int(extra.get("output_tokens", 0)),
         "total_tokens": int(base.get("total_tokens", 0)) + int(extra.get("total_tokens", 0)),
     }
+
+
+def token_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    return {
+        "input_tokens": max(
+            0,
+            int(after.get("input_tokens", 0)) - int(before.get("input_tokens", 0)),
+        ),
+        "output_tokens": max(
+            0,
+            int(after.get("output_tokens", 0)) - int(before.get("output_tokens", 0)),
+        ),
+        "total_tokens": max(
+            0,
+            int(after.get("total_tokens", 0)) - int(before.get("total_tokens", 0)),
+        ),
+    }
+
+
+def estimate_prompt_tokens(text: str, *, chars_per_token: int = 4) -> int:
+    cleaned = text.strip()
+    if not cleaned:
+        return 0
+    divisor = max(1, chars_per_token)
+    return max(1, math.ceil(len(cleaned) / divisor))
 
 
 def format_compact_count(value: int) -> str:

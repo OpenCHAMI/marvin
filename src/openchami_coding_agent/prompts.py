@@ -4,6 +4,57 @@ from __future__ import annotations
 
 from .config import default_working_directory, repo_listing
 from .models import AgentConfig, PlanStep, RepoSpec
+from .plan_tracking import extract_plan_steps
+
+_MAX_PLAN_DIGEST_STEPS = 8
+_MAX_STEP_DETAIL_CHARS = 160
+_MAX_PROBLEM_CHARS = 600
+_MAX_FAILURE_CHARS = 4000
+
+
+def _clip_text(text: str, max_chars: int) -> str:
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 3].rstrip() + "..."
+
+
+def _clip_tail_text(text: str, max_chars: int) -> str:
+    cleaned = text.strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return "...\n" + cleaned[-(max_chars - 4) :]
+
+
+def _render_step_digest(step: PlanStep | str, index: int) -> str:
+    if isinstance(step, PlanStep):
+        description = (
+            _clip_text(step.description, _MAX_STEP_DETAIL_CHARS)
+            if step.description
+            else ""
+        )
+        if description and description.lower() != step.name.strip().lower():
+            return f"{index}. {step.name} - {description}"
+        return f"{index}. {step.name}"
+    return f"{index}. {_clip_text(str(step), _MAX_STEP_DETAIL_CHARS)}"
+
+
+def _plan_digest(plan_markdown: str, structured_plan: list[PlanStep] | None = None) -> str:
+    steps: list[PlanStep | str] = (
+        list(structured_plan)
+        if structured_plan
+        else extract_plan_steps(plan_markdown)
+    )
+    if not steps:
+        return _clip_text(plan_markdown, 1000) or "No structured plan digest available."
+
+    lines = [f"- total steps: {len(steps)}"]
+    visible_steps = steps[:_MAX_PLAN_DIGEST_STEPS]
+    lines.extend(_render_step_digest(step, index + 1) for index, step in enumerate(visible_steps))
+    remaining = len(steps) - len(visible_steps)
+    if remaining > 0:
+        lines.append(f"- +{remaining} additional step(s) omitted from this prompt for brevity.")
+    return "\n".join(lines)
 
 
 def _append_instruction_section(prompt: str, title: str, text: str) -> str:
@@ -18,6 +69,8 @@ def build_repo_fix_prompt(
     plan_markdown: str,
     failure_text: str,
     attempt: int,
+    *,
+    structured_plan: list[PlanStep] | None = None,
 ) -> str:
     workspace = str(cfg.workspace) if cfg.workspace else "<workspace-not-set>"
     workdir = str(default_working_directory(cfg) or workspace)
@@ -37,11 +90,11 @@ Repository:
 - name: {repo.name}
 - path: {repo.path}
 
-Plan context:
-{plan_markdown}
+Plan digest:
+{_plan_digest(plan_markdown, structured_plan)}
 
 Validation failure details:
-{failure_text}
+{_clip_tail_text(failure_text, _MAX_FAILURE_CHARS)}
 
 Repair attempt: {attempt}
 
@@ -50,6 +103,8 @@ Requirements:
 2. Preserve backward compatibility where practical.
 3. Do not read, modify, or create files outside the workspace root path.
 4. Summarize edits and why they fix the failures.
+5. Use the validation failure details and plan digest only as focused context;
+    do not re-plan unrelated work.
 """.strip()
     prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
     return _append_instruction_section(
@@ -132,7 +187,12 @@ Structured step schema requirements:
     )
 
 
-def build_executor_prompt(cfg: AgentConfig, plan_markdown: str) -> str:
+def build_executor_prompt(
+    cfg: AgentConfig,
+    plan_markdown: str,
+    *,
+    structured_plan: list[PlanStep] | None = None,
+) -> str:
     workspace = str(cfg.workspace) if cfg.workspace else "<workspace-not-set>"
     workdir = str(default_working_directory(cfg) or workspace)
     requirements = (
@@ -158,8 +218,8 @@ Execution constraints:
 Execution requirements:
 {requirements}
 
-Plan to execute:
-{plan_markdown}
+Plan digest:
+{_plan_digest(plan_markdown, structured_plan)}
 
 Execution rules:
 1. Work in the listed repository paths only.
@@ -173,6 +233,8 @@ Execution rules:
     - `plan/marvin.md` is the source of truth for completed vs remaining work.
     - `plan/step-*.md` files each represent one executable step.
     - Reconcile actual execution progress against the plan after each major change.
+9. Treat the current step control block as authoritative;
+    do not infer extra work from omitted plan details.
 """.strip()
     prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
     return _append_instruction_section(
@@ -205,12 +267,12 @@ Default shell working directory:
 
 Overall project:
 - project: {cfg.project}
-- problem: {cfg.problem}
+- problem: {_clip_text(cfg.problem, _MAX_PROBLEM_CHARS)}
 
 Current main step to expand:
 - index: {main_step_index}/{total_main_steps}
 - name: {main_step.name}
-- description: {main_step.description or '<none>'}
+- description: {_clip_text(main_step.description or '<none>', _MAX_STEP_DETAIL_CHARS * 2)}
 
 Requirements:
 1. Produce only the sub-steps needed to complete this main step.

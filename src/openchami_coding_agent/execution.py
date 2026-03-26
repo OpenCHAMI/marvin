@@ -25,6 +25,7 @@ from .prompts import build_executor_prompt, build_repo_fix_prompt, build_subplan
 from .reporting import emit_panel, progress_heartbeat, render_check_status, render_run_progress
 from .ursa_compat import get_agent_class, hash_plan, instantiate_agent, snapshot_sqlite_db
 from .utils import (
+    estimate_prompt_tokens,
     extract_agent_status_message,
     extract_agent_tokens,
     extract_brief_model_message,
@@ -33,6 +34,7 @@ from .utils import (
     merge_tokens,
     run_command,
     save_exec_progress,
+    token_delta,
     truncate_tail,
 )
 
@@ -40,10 +42,14 @@ from .utils import (
 def build_repair_token_usage_provider(
     *,
     base_tokens: dict[str, int],
+    agent_baseline: dict[str, int],
     executor: Any,
 ) -> Callable[[], dict[str, int]]:
     def provider() -> dict[str, int]:
-        return merge_tokens(base_tokens, extract_agent_tokens(executor))
+        return merge_tokens(
+            base_tokens,
+            token_delta(agent_baseline, extract_agent_tokens(executor)),
+        )
 
     return provider
 
@@ -422,6 +428,57 @@ def step_to_text(step: PlanStep | str) -> str:
     return str(step)
 
 
+def _record_token_event(
+    events: list[dict[str, Any]],
+    *,
+    stage: str,
+    label: str,
+    prompt: str,
+    delta: dict[str, int],
+    main_step: int | None = None,
+    sub_step: int | None = None,
+    repo_name: str | None = None,
+) -> None:
+    events.append(
+        {
+            "stage": stage,
+            "label": label,
+            "main_step": main_step,
+            "sub_step": sub_step,
+            "repo": repo_name,
+            "prompt_chars": len(prompt),
+            "prompt_estimated_tokens": estimate_prompt_tokens(prompt),
+            "input_tokens": int(delta.get("input_tokens", 0)),
+            "output_tokens": int(delta.get("output_tokens", 0)),
+            "total_tokens": int(delta.get("total_tokens", 0)),
+        }
+    )
+
+
+def summarize_token_events(events: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    summary: dict[str, dict[str, int]] = {}
+    for event in events:
+        stage = str(event.get("stage") or "unknown")
+        bucket = summary.setdefault(
+            stage,
+            {
+                "count": 0,
+                "prompt_chars": 0,
+                "prompt_estimated_tokens": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            },
+        )
+        bucket["count"] += 1
+        bucket["prompt_chars"] += int(event.get("prompt_chars", 0) or 0)
+        bucket["prompt_estimated_tokens"] += int(event.get("prompt_estimated_tokens", 0) or 0)
+        bucket["input_tokens"] += int(event.get("input_tokens", 0) or 0)
+        bucket["output_tokens"] += int(event.get("output_tokens", 0) or 0)
+        bucket["total_tokens"] += int(event.get("total_tokens", 0) or 0)
+    return summary
+
+
 def _materialize_plan_steps(
     plan_steps: list[str],
     structured_plan: list[PlanStep] | None,
@@ -474,6 +531,7 @@ def _generate_subplan(
     main_step_index: int,
     total_main_steps: int,
     token_usage: dict[str, int],
+    token_events: list[dict[str, Any]],
     verbose_io: bool,
     started: float,
 ) -> tuple[list[PlanStep], dict[str, int]]:
@@ -488,6 +546,14 @@ def _generate_subplan(
             return model_status
         return planning_activity
 
+    subplan_prompt = build_subplanner_prompt(
+        cfg,
+        main_step=main_step,
+        main_step_index=main_step_index,
+        total_main_steps=total_main_steps,
+    )
+    planner_baseline = extract_agent_tokens(planner)
+
     with progress_heartbeat(
         stage="planning",
         detail=planning_activity,
@@ -495,21 +561,15 @@ def _generate_subplan(
         current_main_step=main_step_index,
         current_main_total=total_main_steps,
         detail_provider=subplanning_detail_provider,
-        token_usage_provider=lambda: merge_tokens(token_usage, extract_agent_tokens(planner)),
+        token_usage_provider=lambda: merge_tokens(
+            token_usage,
+            token_delta(planner_baseline, extract_agent_tokens(planner)),
+        ),
         total_repos_provider=lambda: len(cfg.repos),
         start_time=started,
         interval_sec=2.0,
     ):
-        invocation = invoke_agent(
-            planner,
-            build_subplanner_prompt(
-                cfg,
-                main_step=main_step,
-                main_step_index=main_step_index,
-                total_main_steps=total_main_steps,
-            ),
-            verbose_io,
-        )
+        invocation = invoke_agent(planner, subplan_prompt, verbose_io)
 
     normalized = structured_plan_from_agent_response(
         invocation.raw_response,
@@ -517,7 +577,16 @@ def _generate_subplan(
         source="subplanner",
     )
     substeps = normalized.steps or [main_step]
-    return substeps, merge_tokens(token_usage, extract_agent_tokens(planner))
+    subplan_delta = token_delta(planner_baseline, extract_agent_tokens(planner))
+    _record_token_event(
+        token_events,
+        stage="subplanning",
+        label=f"main {main_step_index}/{total_main_steps}: {main_step.name}",
+        prompt=subplan_prompt,
+        delta=subplan_delta,
+        main_step=main_step_index,
+    )
+    return substeps, merge_tokens(token_usage, subplan_delta)
 
 
 def _build_progress_payload(
@@ -620,7 +689,12 @@ def execute_plan(
             border_style="blue",
         )
 
-    base_executor_prompt = build_executor_prompt(cfg, plan_markdown)
+    token_events: list[dict[str, Any]] = []
+    base_executor_prompt = build_executor_prompt(
+        cfg,
+        plan_markdown,
+        structured_plan=materialized_steps,
+    )
     planner_conn: sqlite3.Connection | None = None
     planner: Any | None = None
 
@@ -669,6 +743,7 @@ def execute_plan(
                     main_step_index=main_index + 1,
                     total_main_steps=len(materialized_steps),
                     token_usage=token_usage,
+                    token_events=token_events,
                     verbose_io=cfg.verbose_io,
                     started=started,
                 )
@@ -701,19 +776,25 @@ def execute_plan(
                     reconciliation="Hierarchical execution in progress.",
                 )
 
+                previous_summary_brief = extract_brief_model_message(
+                    previous_summary,
+                    fallback="No prior sub-step summary.",
+                    max_chars=240,
+                )
                 step_prompt = (
                     f"{base_executor_prompt}\n\n"
                     "Execution control:\n"
                     f"- Current main step: {step_to_text(main_step)}\n"
                     f"- Execute ONLY this sub-step now: {sub_index + 1}/{len(sub_steps)}\n"
                     f"- Current sub-step detail: {step_to_text(sub_step)}\n"
-                    f"- Previous sub-step summary: {previous_summary}\n"
+                    f"- Previous sub-step summary: {previous_summary_brief}\n"
                     "- Do not start later main steps or later sub-steps in this invocation.\n"
                     "- Return a concise summary of changes made for this sub-step."
                 )
 
                 current_activity = execution_activity
                 step_base_tokens = token_usage.copy()
+                executor_baseline = extract_agent_tokens(executor)
 
                 def step_execution_detail_provider(activity: str = current_activity) -> str:
                     model_status = extract_agent_status_message(executor, fallback="")
@@ -724,8 +805,12 @@ def execute_plan(
 
                 def step_token_usage_provider(
                     base_tokens: dict[str, int] = step_base_tokens,
+                    agent_baseline: dict[str, int] = executor_baseline,
                 ) -> dict[str, int]:
-                    return merge_tokens(base_tokens, extract_agent_tokens(executor))
+                    return merge_tokens(
+                        base_tokens,
+                        token_delta(agent_baseline, extract_agent_tokens(executor)),
+                    )
 
                 with progress_heartbeat(
                     stage="execution",
@@ -764,7 +849,20 @@ def execute_plan(
                     f"Sub {sub_index + 1}/{len(sub_steps)}\n"
                     f"{step_summary}"
                 ).strip()
-                token_usage = merge_tokens(token_usage, extract_agent_tokens(executor))
+                step_delta = token_delta(executor_baseline, extract_agent_tokens(executor))
+                token_usage = merge_tokens(token_usage, step_delta)
+                _record_token_event(
+                    token_events,
+                    stage="execution",
+                    label=(
+                        f"main {main_index + 1}/{len(materialized_steps)} "
+                        f"sub {sub_index + 1}/{len(sub_steps)}: {sub_step.name}"
+                    ),
+                    prompt=step_prompt,
+                    delta=step_delta,
+                    main_step=main_index + 1,
+                    sub_step=sub_index + 1,
+                )
                 sub_entry["next_index"] = sub_index + 1
                 sub_entry["last_summary"] = step_summary
                 subplans[str(main_index)] = sub_entry
@@ -853,6 +951,7 @@ def execute_plan(
 
             current_activity = execution_activity
             step_base_tokens = token_usage.copy()
+            executor_baseline = extract_agent_tokens(executor)
 
             def step_execution_detail_provider(activity: str = current_activity) -> str:
                 model_status = extract_agent_status_message(executor, fallback="")
@@ -863,8 +962,12 @@ def execute_plan(
 
             def step_token_usage_provider(
                 base_tokens: dict[str, int] = step_base_tokens,
+                agent_baseline: dict[str, int] = executor_baseline,
             ) -> dict[str, int]:
-                return merge_tokens(base_tokens, extract_agent_tokens(executor))
+                return merge_tokens(
+                    base_tokens,
+                    token_delta(agent_baseline, extract_agent_tokens(executor)),
+                )
 
             with progress_heartbeat(
                 stage="execution",
@@ -894,7 +997,16 @@ def execute_plan(
                 f"Step {step_index + 1}/{len(plan_steps)}\n"
                 f"{step_summary}"
             ).strip()
-            token_usage = merge_tokens(token_usage, extract_agent_tokens(executor))
+            step_delta = token_delta(executor_baseline, extract_agent_tokens(executor))
+            token_usage = merge_tokens(token_usage, step_delta)
+            _record_token_event(
+                token_events,
+                stage="execution",
+                label=f"step {step_index + 1}/{len(plan_steps)}: {step_text}",
+                prompt=step_prompt,
+                delta=step_delta,
+                main_step=step_index + 1,
+            )
             next_step_index = step_index + 1
             _save_executor_snapshot(executor_db, workspace, main_step=step_index + 1)
             save_exec_progress(
@@ -952,11 +1064,15 @@ def execute_plan(
             tracker_detail = read_tracker_activity(workspace)
             return tracker_detail or execution_activity
 
+        executor_baseline = extract_agent_tokens(executor)
         with progress_heartbeat(
             stage="execution",
             detail=execution_activity,
             detail_provider=execution_detail_provider,
-            token_usage_provider=lambda: merge_tokens(token_usage, extract_agent_tokens(executor)),
+            token_usage_provider=lambda: merge_tokens(
+                token_usage,
+                token_delta(executor_baseline, extract_agent_tokens(executor)),
+            ),
             total_repos_provider=lambda: len(cfg.repos),
             start_time=started,
             interval_sec=2.0,
@@ -976,7 +1092,15 @@ def execute_plan(
             notes=["Fallback full-plan pass completed."],
             reconciliation="Fallback pass complete.",
         )
-        token_usage = merge_tokens(token_usage, extract_agent_tokens(executor))
+        fallback_delta = token_delta(executor_baseline, extract_agent_tokens(executor))
+        token_usage = merge_tokens(token_usage, fallback_delta)
+        _record_token_event(
+            token_events,
+            stage="execution",
+            label="fallback full-plan pass",
+            prompt=base_executor_prompt,
+            delta=fallback_delta,
+        )
         save_exec_progress(
             workspace,
             cfg.executor_progress_json,
@@ -1171,12 +1295,14 @@ def execute_plan(
             if repo.name not in failed_map:
                 continue
             repo_retries[repo.name] = repo_retries.get(repo.name, 0) + 1
+            executor_baseline = extract_agent_tokens(executor)
             fix_prompt = build_repo_fix_prompt(
                 cfg,
                 repo,
                 plan_markdown,
                 format_repo_check_failures(failed_map[repo.name]),
                 attempt=attempt + 1,
+                structured_plan=materialized_steps,
             )
             emit_panel(
                 (
@@ -1188,6 +1314,7 @@ def execute_plan(
             base_tokens = token_usage.copy()
             token_usage_provider = build_repair_token_usage_provider(
                 base_tokens=base_tokens,
+                agent_baseline=executor_baseline,
                 executor=executor,
             )
             detail_provider = build_repair_detail_provider(
@@ -1245,7 +1372,16 @@ def execute_plan(
                 f"{summary}\n\n---\n"
                 f"Auto-repair for {repo.name} (attempt {attempt + 1}):\n{fix_summary}"
             )
-            token_usage = merge_tokens(token_usage, extract_agent_tokens(executor))
+            repair_delta = token_delta(executor_baseline, extract_agent_tokens(executor))
+            token_usage = merge_tokens(token_usage, repair_delta)
+            _record_token_event(
+                token_events,
+                stage="repair",
+                label=f"{repo.name} attempt {attempt + 1}",
+                prompt=fix_prompt,
+                delta=repair_delta,
+                repo_name=repo.name,
+            )
             save_exec_progress(
                 workspace,
                 cfg.executor_progress_json,
@@ -1351,6 +1487,8 @@ def execute_plan(
         "failed_repos": sorted(failed_repos),
         "all_checks_passed": all_checks_passed,
         "token_usage": token_usage,
+        "token_events": token_events,
+        "token_usage_by_stage": summarize_token_events(token_events),
         "duration_sec": duration_sec,
     }
     executor_conn.close()

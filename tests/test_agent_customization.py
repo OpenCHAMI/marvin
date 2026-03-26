@@ -1,11 +1,12 @@
 from pathlib import Path
 
 from openchami_coding_agent.constants import AGENT_NAME, AGENT_PERSONA_INSTRUCTION
-from openchami_coding_agent.models import AgentConfig, RepoSpec
+from openchami_coding_agent.models import AgentConfig, PlanStep, RepoSpec
 from openchami_coding_agent.prompts import (
     build_executor_prompt,
     build_planner_prompt,
     build_repo_fix_prompt,
+    build_subplanner_prompt,
 )
 
 
@@ -73,8 +74,33 @@ def test_prompt_builders_include_shared_and_specific_agent_customization(tmp_pat
     )
 
     planner_prompt = build_planner_prompt(cfg)
-    executor_prompt = build_executor_prompt(cfg, "1. Do the thing")
-    repair_prompt = build_repo_fix_prompt(cfg, repo, "1. Do the thing", "failure", 1)
+    structured_steps = [PlanStep(name=f"Step {index}") for index in range(1, 11)]
+    executor_prompt = build_executor_prompt(
+        cfg,
+        "1. Do the thing",
+        structured_plan=structured_steps,
+    )
+    repair_prompt = build_repo_fix_prompt(
+        cfg,
+        repo,
+        "1. Do the thing",
+        "failure\n" + ("x" * 5000),
+        1,
+        structured_plan=structured_steps,
+    )
+    subplanner_prompt = build_subplanner_prompt(
+        AgentConfig(
+            project="OpenCHAMI",
+            problem="A very long problem statement. " * 80,
+            workspace=tmp_path,
+            repos=[repo],
+            agent_name="Ford",
+            persona_instruction="Stay calm and pragmatic.",
+        ),
+        main_step=PlanStep(name="Implement token trimming", description="Tighten prompts"),
+        main_step_index=1,
+        total_main_steps=3,
+    )
 
     assert "You are Ford" in planner_prompt
     assert "Stay calm and pragmatic." in planner_prompt
@@ -88,7 +114,16 @@ def test_prompt_builders_include_shared_and_specific_agent_customization(tmp_pat
     assert "You are Ford." in executor_prompt
     assert "Shared agent instructions:\nShared guidance." in executor_prompt
     assert "Executor-specific agent instructions:\nExecutor guidance." in executor_prompt
+    assert "Plan digest:" in executor_prompt
+    assert "+2 additional step(s) omitted from this prompt for brevity." in executor_prompt
+    assert "Plan to execute:" not in executor_prompt
 
     assert "You are Ford, repairing" in repair_prompt
     assert "Shared agent instructions:\nShared guidance." in repair_prompt
     assert "Repair-specific agent instructions:\nRepair guidance." in repair_prompt
+    assert "Plan digest:" in repair_prompt
+    assert "Validation failure details:" in repair_prompt
+    assert len(repair_prompt) < 6000
+
+    assert "Overall project:" in subplanner_prompt
+    assert len(subplanner_prompt) < 2500
