@@ -24,9 +24,292 @@ from .models import AgentConfig, ProgressSnapshot
 from .pipeline import run_pipeline_with_reporter
 from .progress_view import build_progress_display, repo_status_label, stage_label
 from .reporting import ProgressReporter
-from .utils import format_compact_count, format_elapsed_runtime
+from .utils import format_compact_count, format_elapsed_runtime, token_delta
 
 PROGRESS_REPEAT_COOLDOWN_SEC = 15.0
+
+_TOKEN_STAGE_ORDER = ["planning", "subplanning", "execution", "repair"]
+
+
+def _format_token_triplet(tokens: dict[str, Any]) -> str:
+    return (
+        f"{format_compact_count(int(tokens.get('input_tokens', 0)))}/"
+        f"{format_compact_count(int(tokens.get('output_tokens', 0)))}/"
+        f"{format_compact_count(int(tokens.get('total_tokens', 0)))}"
+    )
+
+
+def _progress_focus_phrase(snapshot: ProgressSnapshot) -> str:
+    parts: list[str] = []
+    if snapshot.current_main_step is not None and snapshot.current_main_total:
+        parts.append(
+            f"main {snapshot.current_main_step}/{snapshot.current_main_total}"
+        )
+    if snapshot.current_sub_step is not None and snapshot.current_sub_total:
+        parts.append(f"sub {snapshot.current_sub_step}/{snapshot.current_sub_total}")
+    if snapshot.current_repo:
+        parts.append(f"repo {snapshot.current_repo}")
+    if snapshot.checkpoint_label:
+        parts.append(f"checkpoint {snapshot.checkpoint_label}")
+    return ", ".join(parts)
+
+
+def _progress_pressure_phrase(snapshot: ProgressSnapshot) -> str:
+    total_tokens = int(snapshot.token_usage.get("total_tokens", 0) or 0)
+    if snapshot.failed_repos > 0:
+        return f"{snapshot.failed_repos} repo failure(s) are currently objecting"
+    if snapshot.retries > 0:
+        return f"retry count is up to {snapshot.retries}, which is rarely a compliment"
+    if total_tokens >= 20_000:
+        return "token expenditure is entering the theatrical range"
+    if total_tokens >= 8_000:
+        return "token usage is climbing in a way finance would dislike"
+    if snapshot.total_repos and snapshot.completed_repos:
+        return (
+            f"repo progress is {snapshot.completed_repos}/{snapshot.total_repos}, "
+            "which passes for momentum"
+        )
+    return "the machinery continues to impersonate order"
+
+
+def _completion_personality_line(payload: dict[str, Any]) -> str:
+    failed = payload.get("failed_repos") or []
+    total_tokens = int((payload.get("token_usage") or {}).get("total_tokens", 0) or 0)
+    if failed:
+        return "Run complete, in the technical sense that nothing further happened voluntarily."
+    if total_tokens >= 20_000:
+        return "Run complete. We spent an extravagant amount of cognition getting here."
+    if total_tokens >= 8_000:
+        return "Run complete. The token bill has survived to tell its story."
+    return "Run complete. The universe remains largely unimpressed."
+
+
+def _token_observation(
+    *,
+    stage: str,
+    token_usage: dict[str, int],
+    token_delta_usage: dict[str, int],
+    payload: dict[str, Any],
+) -> str:
+    total_tokens = int(token_usage.get("total_tokens", 0) or 0)
+    delta_total = int(token_delta_usage.get("total_tokens", 0) or 0)
+    rollups = payload.get("token_usage_by_stage") or {}
+    execution_total = int(((rollups.get("execution") or {}).get("total_tokens", 0)) or 0)
+    repair_total = int(((rollups.get("repair") or {}).get("total_tokens", 0)) or 0)
+
+    if repair_total and repair_total >= execution_total and repair_total > 0:
+        return (
+            "Observation: repair work is consuming as much thought as delivery, "
+            "which is unflattering."
+        )
+    if delta_total >= 1_500:
+        return "Observation: the latest update was expensive enough to leave a mark."
+    if total_tokens >= 20_000:
+        return "Observation: cumulative token usage is now openly dramatic."
+    if stage == "planning":
+        return "Observation: planning remains cheaper than improvising damage control later."
+    if stage == "validation":
+        return "Observation: validation is where optimism is audited."
+    return "Observation: the token budget is still intact, if not cheerful."
+
+
+def build_marvin_commentary_from_progress(
+    snapshot: ProgressSnapshot,
+    cycle_index: int = 0,
+) -> str:
+    stage = snapshot.stage.lower()
+    detail = (snapshot.detail or "").strip()
+    focus = _progress_focus_phrase(snapshot)
+    pressure = _progress_pressure_phrase(snapshot)
+    variants: dict[str, list[str]] = {
+        "planning": [
+            "I am distilling ambition into something with numbered edges",
+            "I am translating intent into sequenced regret",
+            "I am arranging requirements into a structure reality might tolerate",
+        ],
+        "execution": [
+            "I am executing the plan despite obvious cosmic objections",
+            "I am applying changes with the enthusiasm of a supervised meteor",
+            "I am advancing through the queue because avoidance has poor throughput",
+        ],
+        "validation": [
+            "I am comparing our changes with reality, which remains discouragingly specific",
+            "I am checking whether tests agree with our fiction",
+            "I am validating outcomes before confidence embarrasses us in public",
+        ],
+        "repair": [
+            "I am repairing the latest collapse with professional irritation",
+            "I am patching consequences one avoidable failure at a time",
+            "I am in repair mode, where optimism goes to be disproven",
+        ],
+        "complete": [
+            "The run has concluded, improbably",
+            "Execution is complete; the universe has not objected yet",
+            "This pass is done. Please try not to wake another bug",
+        ],
+        "failed": [
+            "The run has failed, as entropy prefers",
+            "We have reached an unscheduled lesson in humility",
+            "Failure is confirmed; at least it is now measurable",
+        ],
+        "default": [
+            "Progress continues with predictable melancholy",
+            "Activity persists while certainty remains unavailable",
+            "Another update arrives from the abyss",
+        ],
+    }
+    stage_variants = variants.get(stage, variants["default"])
+    preface = stage_variants[cycle_index % len(stage_variants)]
+    clauses = [preface]
+    if focus:
+        clauses.append(f"Current focus: {focus}")
+    if pressure:
+        clauses.append(pressure)
+    if detail:
+        clauses.append(detail)
+
+    return ". ".join(clause.rstrip(" .") for clause in clauses if clause).strip() + "."
+
+
+def load_summary_payload(workspace: Path | None, summary_json: str) -> dict[str, Any]:
+    summary_path = (workspace / summary_json).resolve() if workspace else None
+    if summary_path is None or not summary_path.exists():
+        return {}
+    try:
+        loaded = json.loads(summary_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def token_stage_report_lines(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("token_usage_by_stage")
+    if not isinstance(raw, dict) or not raw:
+        return ["- Stage rollups will appear after the execution summary is written."]
+
+    ordered = [stage for stage in _TOKEN_STAGE_ORDER if stage in raw]
+    ordered.extend(stage for stage in sorted(raw) if stage not in ordered)
+
+    lines: list[str] = []
+    for stage in ordered:
+        values = raw.get(stage) or {}
+        if not isinstance(values, dict):
+            continue
+        lines.append(
+            "- "
+            f"{stage_label(stage)}: calls={int(values.get('count', 0))} | "
+            f"prompt~{format_compact_count(int(values.get('prompt_estimated_tokens', 0)))} | "
+            f"tokens={_format_token_triplet(values)}"
+        )
+    return lines or ["- Stage rollups will appear after the execution summary is written."]
+
+
+def token_hotspot_lines(payload: dict[str, Any], *, limit: int = 5) -> list[str]:
+    raw = payload.get("token_events")
+    if not isinstance(raw, list) or not raw:
+        return ["- Detailed token hotspots will appear after execution completes."]
+
+    events = [event for event in raw if isinstance(event, dict)]
+    if not events:
+        return ["- Detailed token hotspots will appear after execution completes."]
+
+    ranked = sorted(
+        events,
+        key=lambda event: (
+            int(event.get("total_tokens", 0) or 0),
+            int(event.get("prompt_estimated_tokens", 0) or 0),
+        ),
+        reverse=True,
+    )[: max(1, limit)]
+
+    lines: list[str] = []
+    for index, event in enumerate(ranked, start=1):
+        label = str(event.get("label") or "unnamed invocation")
+        stage = stage_label(str(event.get("stage") or "unknown"))
+        repo_name = str(event.get("repo") or "").strip()
+        repo_suffix = f" | repo={repo_name}" if repo_name else ""
+        lines.append(
+            f"{index}. {stage}: {label}{repo_suffix} | "
+            f"prompt~{format_compact_count(int(event.get('prompt_estimated_tokens', 0)))} | "
+            f"total={format_compact_count(int(event.get('total_tokens', 0)))}"
+        )
+    return lines
+
+
+def build_completion_summary_text(workspace_name: str, payload: dict[str, Any]) -> str:
+    completed = payload.get("completed_repos") or []
+    failed = payload.get("failed_repos") or []
+    tokens = payload.get("token_usage") or {}
+    duration = payload.get("duration_sec")
+    summary = str(payload.get("summary") or "<no summary available>")
+    summary_tail = summary[-900:] if len(summary) > 900 else summary
+
+    return "\n".join(
+        [
+            _completion_personality_line(payload),
+            "",
+            f"Workspace: {workspace_name}",
+            f"Completed repos: {', '.join(completed) if completed else '-'}",
+            f"Failed repos: {', '.join(failed) if failed else '-'}",
+            f"Tokens sent/received/total: {_format_token_triplet(tokens)}",
+            f"Duration: {format_elapsed_runtime(duration)}",
+            "",
+            "Token stage breakdown:",
+            *token_stage_report_lines(payload),
+            "",
+            "Highest-cost invocations:",
+            *token_hotspot_lines(payload, limit=5),
+            "",
+            "Summary tail (the useful part):",
+            summary_tail,
+            "",
+            "Press c to copy summary. Press Enter / Esc / q to close modal.",
+        ]
+    )
+
+
+def build_token_report_text(
+    *,
+    workspace_name: str,
+    stage: str,
+    planning_mode: str,
+    current_step: str,
+    current_repo: str,
+    checkpoint_label: str,
+    repo_progress: str,
+    failures: int,
+    retries: int,
+    token_usage: dict[str, int],
+    token_delta_usage: dict[str, int],
+    elapsed_sec: float | None,
+    payload: dict[str, Any],
+) -> str:
+    lines = [
+        "Token Report",
+        "",
+        _token_observation(
+            stage=stage,
+            token_usage=token_usage,
+            token_delta_usage=token_delta_usage,
+            payload=payload,
+        ),
+        "",
+        f"Workspace: {workspace_name}",
+        f"Stage: {stage_label(stage)}    Planning: {planning_mode}",
+        f"Focus: {current_step or '-'}",
+        f"Repo: {current_repo or '-'}    Checkpoint: {checkpoint_label or '-'}",
+        f"Repo progress: {repo_progress}    Failures: {failures}    Retries: {retries}",
+        f"Cumulative sent/received/total: {_format_token_triplet(token_usage)}",
+        f"Last delta sent/received/total: {_format_token_triplet(token_delta_usage)}",
+        f"Elapsed: {format_elapsed_runtime(elapsed_sec)}",
+        "",
+        "Per-stage rollups:",
+        *token_stage_report_lines(payload),
+        "",
+        "Highest-cost invocations:",
+        *token_hotspot_lines(payload, limit=5),
+    ]
+    return "\n".join(lines)
 
 
 def run_textual_tui(cfg: AgentConfig) -> int:
@@ -78,51 +361,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
         snapshot: ProgressSnapshot,
         cycle_index: int = 0,
     ) -> str:
-        stage = snapshot.stage.lower()
-        detail = (snapshot.detail or "").strip()
-        variants: dict[str, list[str]] = {
-            "planning": [
-                "I am distilling ambition into a plan",
-                "I am translating intent into sequenced regret",
-                "I am arranging requirements into something almost coherent",
-            ],
-            "execution": [
-                "I am executing the plan despite obvious cosmic objections",
-                "I am applying changes with the enthusiasm of a dying star",
-                "I am progressing through steps because stalling solves nothing",
-            ],
-            "validation": [
-                "I am comparing our changes with reality, which is rarely cooperative",
-                "I am checking whether tests agree with our fiction",
-                "I am validating outcomes before confidence embarrasses us",
-            ],
-            "repair": [
-                "I am repairing the latest collapse",
-                "I am patching consequences one avoidable failure at a time",
-                "I am in repair mode, where optimism goes to be disproven",
-            ],
-            "complete": [
-                "The run has concluded, improbably",
-                "Execution is complete; the universe has not objected yet",
-                "This pass is done. Please try not to wake another bug",
-            ],
-            "failed": [
-                "The run has failed, as entropy prefers",
-                "We have reached an unscheduled lesson in humility",
-                "Failure is confirmed; at least it is now measurable",
-            ],
-            "default": [
-                "Progress continues with predictable melancholy",
-                "Activity persists while certainty remains unavailable",
-                "Another update arrives from the abyss",
-            ],
-        }
-        stage_variants = variants.get(stage, variants["default"])
-        preface = stage_variants[cycle_index % len(stage_variants)]
-
-        if detail:
-            return f"{preface}: {detail}"
-        return f"{preface}."
+        return build_marvin_commentary_from_progress(snapshot, cycle_index)
 
     def normalize_progress_detail(detail: str) -> str:
         normalized = re.sub(r"\s+", " ", (detail or "").strip())
@@ -246,7 +485,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
 
         CSS = """
         #header_row {
-            height: 8;
+            height: 9;
             border: round $primary;
             margin: 0 0 1 0;
         }
@@ -284,7 +523,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             height: 19;
             border: round $surface-lighten-1;
         }
-        #timeline, #checks, #git_activity {
+        #timeline, #checks, #git_activity, #token_report {
             height: 1fr;
         }
         #report, #raw_log {
@@ -320,8 +559,20 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                 "output_tokens": 0,
                 "total_tokens": 0,
             }
+            self.last_token_delta: dict[str, int] = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            }
             self.plan_completed = 0
             self.plan_total = 0
+            self.last_repo_progress = "0/0"
+            self.last_failed_repos = 0
+            self.last_retries = 0
+            self.last_planning_mode = cfg.planning_mode
+            self.last_current_repo = "-"
+            self.last_checkpoint_label = "-"
+            self.summary_payload: dict[str, Any] = {}
 
             self.event_history: list[tuple[str, str, str, bool]] = []
             self.event_filter_mode = "all"
@@ -372,6 +623,8 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     yield DataTable(id="checks")
                 with TabPane("Git", id="tab_git"):
                     yield DataTable(id="git_activity")
+                with TabPane("Tokens", id="tab_tokens"):
+                    yield Static("Preparing token report…", id="token_report")
                 with TabPane("Diagnostics", id="tab_diag"):
                     yield RichLog(id="report", wrap=True, highlight=False)
                 with TabPane("Raw Log", id="tab_raw"):
@@ -395,12 +648,14 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             timeline = self.query_one("#timeline", DataTable)
             checks = self.query_one("#checks", DataTable)
             git_activity = self.query_one("#git_activity", DataTable)
+            token_report = self.query_one("#token_report", Static)
 
             plan_markdown.border_title = "Plan (plan/marvin.md)"
             commentary.border_title = "Marvin Commentary"
             timeline.border_title = "Timeline"
             checks.border_title = "Checks"
             git_activity.border_title = "Git Activity"
+            token_report.border_title = "Token Report"
 
             api_key_present = bool(os.getenv("OPENAI_API_KEY"))
             report.write("Diagnostics")
@@ -419,6 +674,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                 "Marvin commentary online. I will provide the emotional damage; "
                 "the status panels will provide the facts."
             )
+            token_report.update(self._token_report_text())
 
             self.set_interval(0.2, self.drain_events)
             self.set_interval(1.0, self.refresh_header_stats)
@@ -614,6 +870,9 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             sent = int(self.last_token_usage.get("input_tokens", 0))
             received = int(self.last_token_usage.get("output_tokens", 0))
             total = int(self.last_token_usage.get("total_tokens", 0))
+            delta_sent = int(self.last_token_delta.get("input_tokens", 0))
+            delta_received = int(self.last_token_delta.get("output_tokens", 0))
+            delta_total = int(self.last_token_delta.get("total_tokens", 0))
 
             progress_pct = 0
             if self.plan_total > 0:
@@ -657,12 +916,24 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     [
                         f"Workspace: {self.workspace_name}    Wall clock: {now}",
                         f"Goal: {self.goal or '-'}",
-                        f"Stage: {label}    Current step: {self.current_step}",
+                        f"Stage: {label}    Focus: {self.current_step}",
+                        (
+                            f"Planning: {self.last_planning_mode}    "
+                            f"Repo progress: {self.last_repo_progress}    "
+                            f"Failures: {self.last_failed_repos}    Retries: {self.last_retries}"
+                        ),
+                        (
+                            f"Repo: {self.last_current_repo}    "
+                            f"Checkpoint: {self.last_checkpoint_label}"
+                        ),
                         (
                             "Tokens sent/received/total: "
                             f"{format_compact_count(sent)}/"
                             f"{format_compact_count(received)}/"
-                            f"{format_compact_count(total)}    "
+                            f"{format_compact_count(total)}    Last delta: "
+                            f"{format_compact_count(delta_sent)}/"
+                            f"{format_compact_count(delta_received)}/"
+                            f"{format_compact_count(delta_total)}    "
                             f"Elapsed: {format_elapsed_runtime(float(elapsed))}    "
                             f"Last update: {format_elapsed_runtime(float(since_update))} ago"
                         ),
@@ -673,6 +944,23 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                         ),
                     ]
                 )
+            )
+
+        def _token_report_text(self) -> str:
+            return build_token_report_text(
+                workspace_name=self.workspace_name,
+                stage=self.last_stage,
+                planning_mode=self.last_planning_mode,
+                current_step=self.current_step,
+                current_repo=self.last_current_repo,
+                checkpoint_label=self.last_checkpoint_label,
+                repo_progress=self.last_repo_progress,
+                failures=self.last_failed_repos,
+                retries=self.last_retries,
+                token_usage=self.last_token_usage,
+                token_delta_usage=self.last_token_delta,
+                elapsed_sec=time.time() - self.started_at,
+                payload=self.summary_payload,
             )
 
         def refresh_plan_tracker(self) -> None:
@@ -748,43 +1036,8 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     )
 
         def _completion_summary_text(self) -> str:
-            workspace = cfg.workspace
-            summary_path = (workspace / cfg.summary_json).resolve() if workspace else None
-            payload: dict[str, Any] = {}
-            if summary_path and summary_path.exists():
-                try:
-                    payload = json.loads(summary_path.read_text(encoding="utf-8"))
-                except Exception:
-                    payload = {}
-
-            completed = payload.get("completed_repos") or []
-            failed = payload.get("failed_repos") or []
-            tokens = payload.get("token_usage") or {}
-            duration = payload.get("duration_sec")
-            summary = str(payload.get("summary") or "<no summary available>")
-            summary_tail = summary[-900:] if len(summary) > 900 else summary
-
-            return "\n".join(
-                [
-                    "Run complete. The universe remains largely unimpressed.",
-                    "",
-                    f"Workspace: {self.workspace_name}",
-                    f"Completed repos: {', '.join(completed) if completed else '-'}",
-                    f"Failed repos: {', '.join(failed) if failed else '-'}",
-                    (
-                        "Tokens sent/received/total: "
-                        f"{format_compact_count(int(tokens.get('input_tokens', 0)))}/"
-                        f"{format_compact_count(int(tokens.get('output_tokens', 0)))}/"
-                        f"{format_compact_count(int(tokens.get('total_tokens', 0)))}"
-                    ),
-                    f"Duration: {format_elapsed_runtime(duration)}",
-                    "",
-                    "Summary tail (the useful part):",
-                    summary_tail,
-                    "",
-                    "Press c to copy summary. Press Enter / Esc / q to close modal.",
-                ]
-            )
+            self.summary_payload = load_summary_payload(cfg.workspace, cfg.summary_json)
+            return build_completion_summary_text(self.workspace_name, self.summary_payload)
 
         def run_pipeline(self) -> None:
             reporter = TextualProgressReporter(self)
@@ -895,6 +1148,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             report = self.query_one("#report", RichLog)
             raw_log = self.query_one("#raw_log", RichLog)
             commentary = self.query_one("#commentary", RichLog)
+            token_report = self.query_one("#token_report", Static)
 
             while not self.event_queue.empty():
                 kind, payload = self.event_queue.get()
@@ -925,11 +1179,20 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     display = build_progress_display(snapshot)
                     self.last_progress_at = time.time()
                     self.last_stage = snapshot.stage
-                    self.last_token_usage = snapshot.token_usage or {
+                    previous_tokens = self.last_token_usage
+                    current_tokens = snapshot.token_usage or {
                         "input_tokens": 0,
                         "output_tokens": 0,
                         "total_tokens": 0,
                     }
+                    self.last_token_delta = token_delta(previous_tokens, current_tokens)
+                    self.last_token_usage = current_tokens
+                    self.last_planning_mode = snapshot.planning_mode
+                    self.last_repo_progress = display.repo_progress
+                    self.last_failed_repos = snapshot.failed_repos
+                    self.last_retries = snapshot.retries
+                    self.last_current_repo = display.current_repo
+                    self.last_checkpoint_label = display.checkpoint_label
                     focus_bits = [display.step_progress]
                     if snapshot.current_repo:
                         focus_bits.append(f"repo {snapshot.current_repo}")
@@ -958,6 +1221,22 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                             message += f" [{display.step_progress}]"
                         if snapshot.current_repo:
                             message += f" [{snapshot.current_repo}]"
+                        if display.repo_progress != "0/0":
+                            message += f" [repos {display.repo_progress}]"
+                        if self.last_token_delta.get("total_tokens", 0):
+                            delta_sent = format_compact_count(
+                                int(self.last_token_delta.get("input_tokens", 0))
+                            )
+                            delta_received = format_compact_count(
+                                int(self.last_token_delta.get("output_tokens", 0))
+                            )
+                            delta_total = format_compact_count(
+                                int(self.last_token_delta.get("total_tokens", 0))
+                            )
+                            message += (
+                                " [tok +"
+                                f"{delta_sent}/{delta_received}/{delta_total}]"
+                            )
                         message += f" — {snapshot.detail}"
                         self.add_event(
                             "progress",
@@ -982,6 +1261,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                             commentary.scroll_end(animate=False)
                         except Exception:
                             pass
+                    token_report.update(self._token_report_text())
                 elif kind == "check_status":
                     checks.clear()
                     status, retry_map = payload
@@ -996,6 +1276,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     ]
                     if active:
                         self.add_event("checks", "Active repo checks: " + ", ".join(active))
+                    token_report.update(self._token_report_text())
                 elif kind == "approval_needed":
                     self.awaiting_execution_approval = True
                     self.execution_approval_response = None
@@ -1026,6 +1307,15 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     self.exit_code = int(payload)
                     self.last_stage = "complete" if self.exit_code == 0 else "failed"
                     self.last_outcome = self.last_stage
+                    self.summary_payload = load_summary_payload(cfg.workspace, cfg.summary_json)
+                    token_report.update(self._token_report_text())
+                    if self.summary_payload:
+                        report.write("\nToken stage breakdown:")
+                        for line in token_stage_report_lines(self.summary_payload):
+                            report.write(line)
+                        report.write("\nHighest-cost invocations:")
+                        for line in token_hotspot_lines(self.summary_payload, limit=5):
+                            report.write(line)
                     self.add_event(
                         "done",
                         (

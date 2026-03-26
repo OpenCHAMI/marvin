@@ -1,0 +1,204 @@
+from openchami_coding_agent.models import ProgressSnapshot
+from openchami_coding_agent.tui import (
+    _completion_personality_line,
+    _token_observation,
+    build_completion_summary_text,
+    build_marvin_commentary_from_progress,
+    build_token_report_text,
+    token_hotspot_lines,
+    token_stage_report_lines,
+)
+
+
+def test_token_stage_report_lines_formats_known_stages() -> None:
+    lines = token_stage_report_lines(
+        {
+            "token_usage_by_stage": {
+                "execution": {
+                    "count": 3,
+                    "prompt_estimated_tokens": 1200,
+                    "input_tokens": 1800,
+                    "output_tokens": 400,
+                    "total_tokens": 2200,
+                },
+                "repair": {
+                    "count": 1,
+                    "prompt_estimated_tokens": 300,
+                    "input_tokens": 500,
+                    "output_tokens": 100,
+                    "total_tokens": 600,
+                },
+            }
+        }
+    )
+
+    assert lines[0].startswith("- Executing: calls=3")
+    assert "prompt~1200" in lines[0]
+    assert any("Repairing: calls=1" in line for line in lines)
+
+
+def test_token_hotspot_lines_sorts_by_total_tokens_descending() -> None:
+    lines = token_hotspot_lines(
+        {
+            "token_events": [
+                {
+                    "stage": "execution",
+                    "label": "smaller",
+                    "prompt_estimated_tokens": 200,
+                    "total_tokens": 300,
+                },
+                {
+                    "stage": "repair",
+                    "label": "largest",
+                    "repo": "svc",
+                    "prompt_estimated_tokens": 600,
+                    "total_tokens": 900,
+                },
+            ]
+        }
+    )
+
+    assert lines[0].startswith("1. Repairing: largest")
+    assert "repo=svc" in lines[0]
+    assert lines[1].startswith("2. Executing: smaller")
+
+
+def test_build_completion_summary_text_includes_stage_rollups_and_hotspots() -> None:
+    text = build_completion_summary_text(
+        "marvin-ws",
+        {
+            "completed_repos": ["svc"],
+            "failed_repos": [],
+            "token_usage": {
+                "input_tokens": 1000,
+                "output_tokens": 250,
+                "total_tokens": 1250,
+            },
+            "duration_sec": 42,
+            "summary": "Applied the change and ran tests.",
+            "token_usage_by_stage": {
+                "execution": {
+                    "count": 2,
+                    "prompt_estimated_tokens": 500,
+                    "input_tokens": 900,
+                    "output_tokens": 200,
+                    "total_tokens": 1100,
+                }
+            },
+            "token_events": [
+                {
+                    "stage": "execution",
+                    "label": "step 1/2",
+                    "prompt_estimated_tokens": 300,
+                    "total_tokens": 700,
+                }
+            ],
+        },
+    )
+
+    assert "Token stage breakdown:" in text
+    assert "Highest-cost invocations:" in text
+    assert "Executing: calls=2" in text
+    assert "1. Executing: step 1/2" in text
+
+
+def test_build_completion_summary_text_uses_failure_aware_tone() -> None:
+    text = build_completion_summary_text(
+        "marvin-ws",
+        {
+            "failed_repos": ["svc"],
+            "token_usage": {"total_tokens": 500},
+        },
+    )
+
+    assert "technical sense" in text
+
+
+def test_build_token_report_text_shows_live_and_summary_sections() -> None:
+    text = build_token_report_text(
+        workspace_name="marvin-ws",
+        stage="execution",
+        planning_mode="hierarchical",
+        current_step="main 2/4 | sub 1/2 | repo svc",
+        current_repo="svc",
+        checkpoint_label="executor_checkpoint_2_1.db",
+        repo_progress="1/3",
+        failures=0,
+        retries=1,
+        token_usage={"input_tokens": 1200, "output_tokens": 300, "total_tokens": 1500},
+        token_delta_usage={"input_tokens": 200, "output_tokens": 40, "total_tokens": 240},
+        elapsed_sec=15,
+        payload={
+            "token_usage_by_stage": {
+                "execution": {
+                    "count": 2,
+                    "prompt_estimated_tokens": 450,
+                    "input_tokens": 800,
+                    "output_tokens": 220,
+                    "total_tokens": 1020,
+                }
+            },
+            "token_events": [
+                {
+                    "stage": "execution",
+                    "label": "step 2/4",
+                    "prompt_estimated_tokens": 250,
+                    "total_tokens": 500,
+                }
+            ],
+        },
+    )
+
+    assert "Token Report" in text
+    assert "Stage: Executing    Planning: hierarchical" in text
+    assert "Last delta sent/received/total: 200/40/240" in text
+    assert "Per-stage rollups:" in text
+    assert "Highest-cost invocations:" in text
+    assert "Observation:" in text
+
+
+def test_token_observation_notices_repair_heaviness() -> None:
+    observation = _token_observation(
+        stage="repair",
+        token_usage={"total_tokens": 9000},
+        token_delta_usage={"total_tokens": 400},
+        payload={
+            "token_usage_by_stage": {
+                "execution": {"total_tokens": 1000},
+                "repair": {"total_tokens": 1500},
+            }
+        },
+    )
+
+    assert "repair work is consuming as much thought as delivery" in observation
+
+
+def test_completion_personality_line_varies_with_token_cost() -> None:
+    line = _completion_personality_line(
+        {"failed_repos": [], "token_usage": {"total_tokens": 22000}}
+    )
+    assert "extravagant amount of cognition" in line
+
+
+def test_build_marvin_commentary_from_progress_includes_focus_and_pressure() -> None:
+    text = build_marvin_commentary_from_progress(
+        ProgressSnapshot(
+            stage="repair",
+            detail="Repairing validation fallout",
+            planning_mode="hierarchical",
+            current_main_step=2,
+            current_main_total=4,
+            current_sub_step=1,
+            current_sub_total=3,
+            current_repo="svc",
+            checkpoint_label="executor_checkpoint_2_1.db",
+            token_usage={"total_tokens": 12000},
+            failed_repos=1,
+            retries=2,
+        ),
+        0,
+    )
+
+    assert "Current focus:" in text
+    assert "repo svc" in text
+    assert "repo failure(s) are currently objecting" in text
