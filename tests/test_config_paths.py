@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from openchami_coding_agent.config import ensure_within_workspace, resolve_repo
+from openchami_coding_agent.models import AgentConfig
 
 
 def test_ensure_within_workspace_rejects_escape(tmp_path: Path) -> None:
@@ -39,3 +40,18 @@ def test_resolve_repo_uses_source_path_when_outside_workspace(
     repo = resolve_repo(workspace, {"name": "foo", "path": str(external_repo)})
     assert repo.path == workspace / "repos" / "foo"
     assert repo.source_path == external_repo
+
+
+def test_agent_config_from_raw_reads_planning_mode(tmp_path: Path) -> None:
+    cfg = AgentConfig.from_raw(
+        {
+            "project": "OpenCHAMI",
+            "problem": "Improve planner",
+            "planning": {"mode": "hierarchical"},
+        },
+        workspace=tmp_path,
+        workspace_reused=False,
+        repos=[],
+    )
+
+    assert cfg.planning_mode == "hierarchical"

@@ -8,15 +8,16 @@ from typing import Any
 
 from .constants import (
     AGENT_NAME,
-    DEFAULT_CONTEXT_CLAIM,
-    DEFAULT_EXEC_PROGRESS_JSON,
-    DEFAULT_PLAN_JSON,
-    DEFAULT_PROPOSAL_MD,
-    DEFAULT_SUMMARY_JSON,
     DEFAULT_WORKSPACE_ROOT,
 )
 from .models import AgentConfig, RepoSpec
 from .reporting import emit_panel, emit_table
+from .ursa_compat import (
+    generate_workspace_name,
+    load_yaml_config,
+    sanitize_for_logging,
+    setup_workspace,
+)
 from .utils import run_command, slugify, to_plain_data
 
 
@@ -25,8 +26,6 @@ def resolve_workspace(
     cli_workspace: str | None = None,
     resume: bool = False,
 ) -> tuple[Path, bool]:
-    from ursa.util.plan_execute_utils import generate_workspace_name
-
     requested = cli_workspace or raw.get("workspace") or raw.get("restart_workspace")
     workspace_root = raw.get("workspace_root") or DEFAULT_WORKSPACE_ROOT
     run_cwd = Path.cwd().resolve()
@@ -115,59 +114,17 @@ def resolve_repo(workspace: Path, raw_repo: dict[str, Any]) -> RepoSpec:
 def parse_config(
     config_path: Path, cli_workspace: str | None = None, resume: bool = False
 ) -> AgentConfig:
-    from ursa.util.plan_execute_utils import load_yaml_config, setup_workspace
-
     raw = to_plain_data(load_yaml_config(str(config_path)))
     workspace, workspace_reused = resolve_workspace(raw, cli_workspace=cli_workspace, resume=resume)
-    setup_workspace(str(workspace))
+    setup_workspace(str(workspace), project=str(raw.get("project") or "run"))
 
     repos = [resolve_repo(workspace, r) for r in raw.get("repos", [])]
-    models = raw.get("models", {})
 
-    return AgentConfig(
-        project=raw["project"],
-        problem=raw["problem"],
-        mode=raw.get("mode", "plan_and_execute"),
+    return AgentConfig.from_raw(
+        raw,
         workspace=workspace,
         workspace_reused=workspace_reused,
-        proposal_markdown=raw.get("outputs", {}).get("proposal_markdown", DEFAULT_PROPOSAL_MD),
-        plan_json=raw.get("outputs", {}).get("plan_json", DEFAULT_PLAN_JSON),
-        summary_json=raw.get("outputs", {}).get("summary_json", DEFAULT_SUMMARY_JSON),
-        context_claim_name=raw.get("task", {}).get("context_claim_name", DEFAULT_CONTEXT_CLAIM),
-        proposal_only=bool(raw.get("task", {}).get("proposal_only", False)),
-        execute_after_plan=bool(raw.get("task", {}).get("execute_after_plan", True)),
         repos=repos,
-        planner_model=models.get("planner") or models.get("default"),
-        executor_model=models.get("executor") or models.get("default"),
-        defaults=raw.get("defaults", {}),
-        planner=raw.get("planner", {}),
-        execution=raw.get("execution", {}),
-        notes=list(raw.get("task", {}).get("notes") or []),
-        deliverables=list(raw.get("task", {}).get("deliverables") or []),
-        plan_requirements=list(raw.get("task", {}).get("plan_requirements") or []),
-        execution_requirements=list(raw.get("task", {}).get("execution_requirements") or []),
-        max_parallel_checks=max(1, int(raw.get("execution", {}).get("max_parallel_checks", 4))),
-        max_check_retries=max(0, int(raw.get("execution", {}).get("max_check_retries", 1))),
-        skip_failed_repos=bool(raw.get("execution", {}).get("skip_failed_repos", False)),
-        check_command_timeout_sec=max(
-            1, int(raw.get("execution", {}).get("check_command_timeout_sec", 900))
-        ),
-        check_output_tail_chars=max(
-            1000, int(raw.get("execution", {}).get("check_output_tail_chars", 12000))
-        ),
-        resume_execution_state=bool(raw.get("execution", {}).get("resume_execution_state", True)),
-        confirm_before_execute=bool(raw.get("task", {}).get("confirm_before_execute", False)),
-        confirm_timeout_sec=max(1, int(raw.get("task", {}).get("confirm_timeout_sec", 30))),
-        resume_from=raw.get("execution", {}).get("resume_from"),
-        executor_progress_json=raw.get("outputs", {}).get(
-            "executor_progress_json", DEFAULT_EXEC_PROGRESS_JSON
-        ),
-        repo_dependencies={
-            str(k): [str(v) for v in (vals or [])]
-            for k, vals in dict(raw.get("execution", {}).get("repo_dependencies", {})).items()
-        },
-        repo_order=[str(x) for x in (raw.get("execution", {}).get("repo_order", []) or [])],
-        verbose_io=bool(raw.get("execution", {}).get("verbose_io", False)),
     )
 
 
@@ -259,16 +216,15 @@ def default_working_directory(cfg: AgentConfig) -> Path | None:
 
 def render_status(cfg: AgentConfig) -> None:
     from rich.table import Table
-    from ursa.util.plan_execute_utils import sanitize_for_logging
 
     table = Table(title=f"{AGENT_NAME} coding agent", show_header=True)
     table.add_column("Field")
     table.add_column("Value")
     table.add_row("Project", cfg.project)
     table.add_row("Mode", cfg.mode)
+    table.add_row("Planning mode", cfg.planning_mode)
     table.add_row("Workspace", str(cfg.workspace))
     table.add_row("Workspace reused", "yes" if cfg.workspace_reused else "no")
-    table.add_row("Context claim", cfg.context_claim_name)
     table.add_row("Proposal", cfg.proposal_markdown)
     table.add_row("Plan JSON", cfg.plan_json)
     table.add_row("Summary JSON", cfg.summary_json)
@@ -277,6 +233,7 @@ def render_status(cfg: AgentConfig) -> None:
     table.add_row("Check retries", str(cfg.max_check_retries))
     table.add_row("Skip failed repos", "yes" if cfg.skip_failed_repos else "no")
     table.add_row("Resume execution state", "yes" if cfg.resume_execution_state else "no")
+    table.add_row("Commit each step", "yes" if cfg.commit_each_step else "no")
     table.add_row("Verbose IO", "yes" if cfg.verbose_io else "no")
     emit_table(table)
 

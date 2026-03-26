@@ -15,7 +15,7 @@ from rich.table import Table
 
 from .constants import AGENT_NAME
 from .models import ProgressSnapshot
-from .utils import format_elapsed_runtime, format_token_counts
+from .progress_view import build_progress_display, progress_snapshot_key
 
 console = Console(file=sys.__stderr__)
 
@@ -56,22 +56,11 @@ class RichProgressReporter(ProgressReporter):
         console.print(table)
 
     def emit_progress(self, snapshot: ProgressSnapshot) -> None:
-        progress_key = (
-            snapshot.workspace or "-",
-            snapshot.stage,
-            snapshot.detail,
-            snapshot.completed_repos,
-            snapshot.total_repos,
-            snapshot.failed_repos,
-            snapshot.retries,
-            int(snapshot.token_usage.get("input_tokens", 0)),
-            int(snapshot.token_usage.get("output_tokens", 0)),
-            int(snapshot.token_usage.get("total_tokens", 0)),
-            round(snapshot.elapsed_sec or 0.0, 1),
-        )
+        progress_key = progress_snapshot_key(snapshot)
         if progress_key == self._last_progress_key:
             return
         self._last_progress_key = progress_key
+        display = build_progress_display(snapshot)
 
         table = Table(title=f"{AGENT_NAME} run progress", show_header=True)
         table.add_column("Workspace")
@@ -83,14 +72,14 @@ class RichProgressReporter(ProgressReporter):
         table.add_column("Tokens")
         table.add_column("Elapsed")
         table.add_row(
-            snapshot.workspace or "-",
-            snapshot.stage,
-            snapshot.detail,
-            f"{snapshot.completed_repos}/{snapshot.total_repos}",
-            str(snapshot.failed_repos),
-            str(snapshot.retries),
-            format_token_counts(snapshot.token_usage),
-            format_elapsed_runtime(snapshot.elapsed_sec),
+            display.workspace,
+            display.stage_label,
+            display.detail,
+            display.repo_progress,
+            display.failures,
+            display.retries,
+            display.tokens,
+            display.elapsed,
         )
         console.print(table)
 

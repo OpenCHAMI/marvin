@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from .config import default_working_directory, repo_listing
-from .constants import AGENT_NAME, AGENT_PERSONA_INSTRUCTION, DEFAULT_CONTEXT_CLAIM
 from .models import AgentConfig, RepoSpec
+
+
+def _append_instruction_section(prompt: str, title: str, text: str) -> str:
+    if not text:
+        return prompt
+    return f"{prompt}\n\n{title}:\n{text}"
 
 
 def build_repo_fix_prompt(
@@ -14,14 +19,13 @@ def build_repo_fix_prompt(
     failure_text: str,
     attempt: int,
 ) -> str:
-    claim = cfg.context_claim_name or DEFAULT_CONTEXT_CLAIM
     workspace = str(cfg.workspace) if cfg.workspace else "<workspace-not-set>"
     workdir = str(default_working_directory(cfg) or workspace)
-    return f"""
-You are {AGENT_NAME}, repairing a repository that failed validation during OpenCHAMI execution.
+    prompt = f"""
+You are {cfg.agent_name}, repairing a repository that failed validation during OpenCHAMI execution.
 
 Persona guidance:
-- {AGENT_PERSONA_INSTRUCTION}
+- {cfg.persona_instruction}
 
 Workspace root (hard containment):
 {workspace}
@@ -43,15 +47,19 @@ Repair attempt: {attempt}
 
 Requirements:
 1. Apply only safe, minimal changes needed to make checks pass.
-2. Keep the project/accounting context claim configurable and default to `{claim}`.
-3. Preserve backward compatibility where practical.
-4. Do not read, modify, or create files outside the workspace root path.
-5. Summarize edits and why they fix the failures.
+2. Preserve backward compatibility where practical.
+3. Do not read, modify, or create files outside the workspace root path.
+4. Summarize edits and why they fix the failures.
 """.strip()
+    prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
+    return _append_instruction_section(
+        prompt,
+        "Repair-specific agent instructions",
+        cfg.repair_prompt_appendix,
+    )
 
 
 def build_planner_prompt(cfg: AgentConfig) -> str:
-    claim = cfg.context_claim_name or DEFAULT_CONTEXT_CLAIM
     workspace = str(cfg.workspace) if cfg.workspace else "<workspace-not-set>"
     workdir = str(default_working_directory(cfg) or workspace)
     requirements = (
@@ -62,11 +70,11 @@ def build_planner_prompt(cfg: AgentConfig) -> str:
     )
     notes = "\n".join(f"- {x}" for x in cfg.notes) or "- Prefer incremental, mergeable changes."
 
-    return f"""
-You are {AGENT_NAME}, drafting the implementation plan for OpenCHAMI development work.
+    prompt = f"""
+You are {cfg.agent_name}, drafting the implementation plan for OpenCHAMI development work.
 
 Persona guidance:
-- {AGENT_PERSONA_INSTRUCTION}
+- {cfg.persona_instruction}
 
 Project: {cfg.project}
 Problem:
@@ -82,10 +90,6 @@ Default shell working directory:
 {workdir}
 
 Important implementation constraint:
-- The project/accounting context claim name is configurable.
-- The default claim field name is `{claim}`.
-- Do not hard-code a private standards document name.
-- When discussing claim handling, refer to it generically as a project/accounting context claim.
 - Keep all planned file operations under the workspace root path above.
 
 Required deliverables:
@@ -107,23 +111,40 @@ Output requirements:
 6. Prefer one feature at a time in dependency order.
 7. Emit steps in a machine-readable numbered form so they can be tracked in
     `plan/marvin.md` and per-step `plan/step-*.md` files.
+8. Each step must be specific enough to execute independently without bundling
+   unrelated work.
+9. Avoid duplicate, overlapping, or purely administrative steps.
+
+Structured step schema requirements:
+- Each executable step should have a short `name`.
+- Include a `description` that explains the concrete work.
+- Include `expected_outputs` listing files, artifacts, or user-visible outcomes.
+- Include `success_criteria` listing the checks that prove the step is done.
+- Include `requires_code` and set it to `false` only for genuinely non-coding steps.
+- If the planner runtime supports structured output, populate that schema directly.
+- If not, ensure the Markdown still maps cleanly to one actionable step per numbered item.
 """.strip()
+    prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
+    return _append_instruction_section(
+        prompt,
+        "Planner-specific agent instructions",
+        cfg.planner_prompt_appendix,
+    )
 
 
 def build_executor_prompt(cfg: AgentConfig, plan_markdown: str) -> str:
-    claim = cfg.context_claim_name or DEFAULT_CONTEXT_CLAIM
     workspace = str(cfg.workspace) if cfg.workspace else "<workspace-not-set>"
     workdir = str(default_working_directory(cfg) or workspace)
     requirements = (
         "\n".join(f"- {x}" for x in cfg.execution_requirements)
         or "- Run focused tests after each meaningful change."
     )
-    return f"""
-You are {AGENT_NAME}. Execute the approved OpenCHAMI coding task according to
+    prompt = f"""
+You are {cfg.agent_name}. Execute the approved OpenCHAMI coding task according to
 the plan below, with your usual resigned competence.
 
 Persona guidance:
-- {AGENT_PERSONA_INSTRUCTION}
+- {cfg.persona_instruction}
 
 Workspace root (hard containment):
 {workspace}
@@ -131,11 +152,8 @@ Workspace root (hard containment):
 Default shell working directory:
 {workdir}
 
-Context claim requirements:
-- Keep the project/accounting context claim field configurable.
-- Default the field name to `{claim}`.
+Execution constraints:
 - Preserve backward compatibility where practical.
-- Avoid naming or referencing any private design document.
 
 Execution requirements:
 {requirements}
@@ -156,3 +174,9 @@ Execution rules:
     - `plan/step-*.md` files each represent one executable step.
     - Reconcile actual execution progress against the plan after each major change.
 """.strip()
+    prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
+    return _append_instruction_section(
+        prompt,
+        "Executor-specific agent instructions",
+        cfg.executor_prompt_appendix,
+    )

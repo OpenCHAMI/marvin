@@ -7,6 +7,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .models import PlanStep, StructuredPlan
+
 
 def plan_directory(workspace: Path) -> Path:
     directory = workspace / "plan"
@@ -64,6 +66,36 @@ def extract_plan_steps(plan_markdown: str) -> list[str]:
     return steps
 
 
+def structured_plan_from_data(data: object, *, source: str = "unknown") -> StructuredPlan:
+    if isinstance(data, StructuredPlan):
+        return data
+
+    raw_steps: object = data
+    if isinstance(data, dict):
+        candidate_steps = data.get("steps")
+        if isinstance(candidate_steps, list):
+            raw_steps = candidate_steps
+        source = str(data.get("source") or source)
+
+    steps: list[PlanStep] = []
+    for item in raw_steps if isinstance(raw_steps, list) else []:
+        step = _coerce_plan_step(item)
+        if step is not None:
+            steps.append(step)
+    return StructuredPlan(steps=steps, source=source)
+
+
+def structured_plan_from_markdown(
+    plan_markdown: str,
+    *,
+    source: str = "markdown-normalized",
+) -> StructuredPlan:
+    return StructuredPlan(
+        steps=[PlanStep(name=name) for name in extract_plan_steps(plan_markdown)],
+        source=source,
+    )
+
+
 def _extract_plan_steps_from_json(raw_text: str) -> list[str]:
     candidate_texts: list[str] = []
     stripped = raw_text.strip()
@@ -98,6 +130,55 @@ def _extract_plan_steps_from_json(raw_text: str) -> list[str]:
     return []
 
 
+def plan_step_names(structured_plan: StructuredPlan | list[PlanStep] | None) -> list[str]:
+    if structured_plan is None:
+        return []
+    if isinstance(structured_plan, StructuredPlan):
+        steps = structured_plan.steps
+    else:
+        steps = structured_plan
+    return [step.name for step in steps if step.name.strip()]
+
+
+def _coerce_plan_step(item: object) -> PlanStep | None:
+    if isinstance(item, PlanStep):
+        return item
+    if isinstance(item, str):
+        name = item.strip()
+        return PlanStep(name=name) if name else None
+
+    if isinstance(item, dict):
+        name = str(item.get("name") or item.get("title") or item.get("id") or "").strip()
+        if not name:
+            return None
+        expected_outputs = item.get("expected_outputs") or []
+        success_criteria = item.get("success_criteria") or []
+        return PlanStep(
+            name=name,
+            description=str(item.get("description") or "").strip(),
+            expected_outputs=[
+                str(value).strip() for value in expected_outputs if str(value).strip()
+            ],
+            success_criteria=[
+                str(value).strip() for value in success_criteria if str(value).strip()
+            ],
+            requires_code=bool(item.get("requires_code", True)),
+        )
+
+    name = str(getattr(item, "name", "") or "").strip()
+    if not name:
+        return None
+    expected_outputs = getattr(item, "expected_outputs", None) or []
+    success_criteria = getattr(item, "success_criteria", None) or []
+    return PlanStep(
+        name=name,
+        description=str(getattr(item, "description", "") or "").strip(),
+        expected_outputs=[str(value).strip() for value in expected_outputs if str(value).strip()],
+        success_criteria=[str(value).strip() for value in success_criteria if str(value).strip()],
+        requires_code=bool(getattr(item, "requires_code", True)),
+    )
+
+
 def _step_filename(index: int, title: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     if not slug:
@@ -105,9 +186,14 @@ def _step_filename(index: int, title: str) -> str:
     return f"step-{index:03d}-{slug}.md"
 
 
-def initialize_plan_artifacts(workspace: Path, plan_markdown: str) -> list[str]:
+def initialize_plan_artifacts(
+    workspace: Path,
+    plan_markdown: str,
+    *,
+    structured_plan: StructuredPlan | list[PlanStep] | None = None,
+) -> list[str]:
     plan_dir = plan_directory(workspace)
-    steps = extract_plan_steps(plan_markdown)
+    steps = plan_step_names(structured_plan) or extract_plan_steps(plan_markdown)
     step_files: list[str] = []
     for index, step in enumerate(steps, start=1):
         filename = _step_filename(index, step)

@@ -1,8 +1,12 @@
 from pathlib import Path
 
+from openchami_coding_agent.models import PlanStep
 from openchami_coding_agent.plan_tracking import (
     initialize_plan_artifacts,
+    plan_step_names,
     read_tracker_activity,
+    structured_plan_from_data,
+    structured_plan_from_markdown,
     tracker_markdown_path,
     update_tracker_markdown,
 )
@@ -71,3 +75,57 @@ def test_extract_plan_steps_from_json_payload() -> None:
         ']}'
     )
     assert extract_plan_steps(payload) == ["Recon", "Write proposal", "Implement exchange"]
+
+
+def test_structured_plan_from_data_normalizes_dict_payload() -> None:
+    structured = structured_plan_from_data(
+        {
+            "source": "planner",
+            "steps": [
+                {
+                    "name": "Recon repo layout",
+                    "description": "Inspect modules and tests.",
+                    "expected_outputs": ["file inventory"],
+                    "success_criteria": ["all touched paths identified"],
+                    "requires_code": False,
+                }
+            ],
+        }
+    )
+
+    assert structured.source == "planner"
+    assert plan_step_names(structured) == ["Recon repo layout"]
+    assert structured.steps[0].expected_outputs == ["file inventory"]
+    assert structured.steps[0].requires_code is False
+
+
+def test_initialize_plan_artifacts_prefers_structured_plan_names(tmp_path: Path) -> None:
+    steps = initialize_plan_artifacts(
+        tmp_path,
+        "1. Wrong markdown step",
+        structured_plan=[
+            PlanStep(name="Correct structured step one"),
+            PlanStep(name="Correct structured step two"),
+        ],
+    )
+
+    assert steps == ["Correct structured step one", "Correct structured step two"]
+    tracker = tracker_markdown_path(tmp_path)
+    text = tracker.read_text(encoding="utf-8")
+    assert "Correct structured step one" in text
+    assert "Wrong markdown step" not in text
+
+
+def test_structured_plan_from_markdown_normalizes_numbered_steps() -> None:
+    structured = structured_plan_from_markdown(
+        """
+        1. Inspect the repository layout
+        2. Add focused tests
+        """
+    )
+
+    assert structured.source == "markdown-normalized"
+    assert plan_step_names(structured) == [
+        "Inspect the repository layout",
+        "Add focused tests",
+    ]

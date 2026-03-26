@@ -7,6 +7,7 @@ from openchami_coding_agent.execution import (
     marvin_plan_step_detail,
     normalize_next_step_index,
     resolve_repo_execution_order,
+    select_execution_agent_class,
     topological_order,
 )
 from openchami_coding_agent.models import AgentConfig, RepoSpec
@@ -100,3 +101,43 @@ def test_normalize_next_step_index_accepts_zero_based_values() -> None:
 def test_normalize_next_step_index_accepts_one_based_values() -> None:
     assert normalize_next_step_index(1, 5) == 0
     assert normalize_next_step_index(5, 5) == 4
+
+
+def test_select_execution_agent_class_defaults_to_execution_agent() -> None:
+    cfg = AgentConfig(
+        project="OpenCHAMI",
+        problem="test",
+        repos=[RepoSpec(name="py", path=Path("/tmp/py"), language="python")],
+    )
+    assert select_execution_agent_class(cfg).__name__ == "ExecutionAgent"
+
+
+def test_select_execution_agent_class_auto_selects_gitgo_for_go_repo() -> None:
+    cfg = AgentConfig(
+        project="OpenCHAMI",
+        problem="test",
+        repos=[RepoSpec(name="go", path=Path("/tmp/go"), language="go")],
+        execution={"executor_agent": "auto"},
+    )
+    assert select_execution_agent_class(cfg).__name__ == "GitGoAgent"
+
+
+def test_select_execution_agent_class_respects_explicit_value() -> None:
+    cfg = AgentConfig(
+        project="OpenCHAMI",
+        problem="test",
+        repos=[RepoSpec(name="go", path=Path("/tmp/go"), language="go")],
+        execution={"executor_agent": "execution"},
+    )
+    assert select_execution_agent_class(cfg).__name__ == "ExecutionAgent"
+
+
+def test_select_execution_agent_class_rejects_unknown_value() -> None:
+    cfg = AgentConfig(
+        project="OpenCHAMI",
+        problem="test",
+        repos=[RepoSpec(name="x", path=Path("/tmp/x"), language="generic")],
+        execution={"executor_agent": "mystery"},
+    )
+    with pytest.raises(ValueError, match="Unknown execution.executor_agent"):
+        select_execution_agent_class(cfg)

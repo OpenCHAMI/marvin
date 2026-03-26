@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 from .config import parse_config
+from .config_init import add_init_arguments, run_init_command
 from .constants import AGENT_NAME
 from .pipeline import run_pipeline_with_reporter
 from .reporting import RichProgressReporter
 from .tui import run_textual_tui
 
 
-def main() -> int:
+def build_root_parser() -> argparse.ArgumentParser:
+    return argparse.ArgumentParser(
+        description=f"{AGENT_NAME}: YAML-driven coding agent",
+        usage="%(prog)s <config> [run options]\n       %(prog)s init [wizard options]",
+        epilog=(
+            "Run commands:\n"
+            "  <config>    Execute Marvin with an existing YAML config.\n"
+            "  init        Interactively create a new Marvin YAML config file."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+
+def build_run_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=f"{AGENT_NAME}: YAML-driven coding agent")
     parser.add_argument("config", help="Path to YAML config")
     parser.add_argument(
@@ -56,8 +71,10 @@ def main() -> int:
         action="store_true",
         help="Use Textual TUI dashboard for run progress.",
     )
-    args = parser.parse_args()
+    return parser
 
+
+def run_with_config(args: argparse.Namespace) -> int:
     config_path = Path(args.config).resolve()
     cfg = parse_config(config_path, cli_workspace=args.workspace, resume=args.resume)
 
@@ -76,3 +93,20 @@ def main() -> int:
         return run_textual_tui(cfg)
 
     return run_pipeline_with_reporter(cfg, RichProgressReporter())
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in {"-h", "--help"}:
+        build_root_parser().print_help()
+        return 0
+
+    if argv[0] == "init":
+        parser = argparse.ArgumentParser(
+            description=f"{AGENT_NAME}: interactive YAML config generator"
+        )
+        add_init_arguments(parser)
+        return run_init_command(parser.parse_args(argv[1:]))
+
+    parser = build_run_parser()
+    return run_with_config(parser.parse_args(argv))

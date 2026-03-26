@@ -22,8 +22,11 @@ from .constants import AGENT_NAME
 from .git_activity import collect_repo_git_activity
 from .models import AgentConfig, ProgressSnapshot
 from .pipeline import run_pipeline_with_reporter
+from .progress_view import repo_status_label, stage_label
 from .reporting import ProgressReporter
 from .utils import format_compact_count, format_elapsed_runtime
+
+PROGRESS_REPEAT_COOLDOWN_SEC = 15.0
 
 
 def run_textual_tui(cfg: AgentConfig) -> int:
@@ -47,22 +50,6 @@ def run_textual_tui(cfg: AgentConfig) -> int:
     Static = textual_widgets.Static
     TabbedContent = textual_widgets.TabbedContent
     TabPane = textual_widgets.TabPane
-
-    stage_labels = {
-        "planning": "Planning",
-        "execution": "Executing",
-        "validation": "Validating",
-        "repair": "Repairing",
-        "complete": "Complete",
-        "failed": "Failed",
-    }
-    repo_status_labels = {
-        "pending": "waiting",
-        "checking": "checking",
-        "failed": "failed",
-        "passed": "passed",
-        "completed": "already complete",
-    }
 
     def marvin_avatar(mood: str = "neutral") -> str:
         face_map = {
@@ -137,6 +124,11 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             return f"{preface}: {detail}"
         return f"{preface}."
 
+    def normalize_progress_detail(detail: str) -> str:
+        normalized = re.sub(r"\s+", " ", (detail or "").strip())
+        normalized = normalized.rstrip(".:")
+        return normalized.lower()
+
     class TextualProgressReporter(ProgressReporter):
         def __init__(self, app_ref: Any):
             self.app_ref = app_ref
@@ -201,6 +193,41 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                 return
             if key in {"enter", "escape", "q"}:
                 self.dismiss()
+
+    class ExecutionApprovalModal(ModalScreenBase):  # type: ignore[misc, valid-type]
+        CSS = """
+        ExecutionApprovalModal {
+            align: center middle;
+        }
+        #approval_box {
+            width: 88;
+            height: auto;
+            border: round $warning;
+            background: $surface;
+            padding: 1 2;
+        }
+        """
+
+        def __init__(self, prompt_text: str) -> None:
+            super().__init__()
+            self.prompt_text = prompt_text
+
+        def compose(self) -> Any:
+            yield Static(self.prompt_text, id="approval_box")
+
+        def on_key(self, event) -> None:
+            key = str(getattr(event, "key", "")).lower()
+            app_ref = getattr(self, "app", None)
+            if app_ref is None:
+                return
+            approve = getattr(app_ref, "approve_execution", None)
+            deny = getattr(app_ref, "deny_execution", None)
+            if key in {"y", "enter"} and callable(approve):
+                approve()
+                return
+            if key in {"n", "escape", "q"} and callable(deny):
+                deny()
+                return
 
     class MarvinTUIApp(AppBase):  # type: ignore[misc, valid-type]
         BINDINGS = [
@@ -273,6 +300,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             self.awaiting_execution_approval = False
             self.execution_approval_event = threading.Event()
             self.execution_approval_response: bool | None = None
+            self.execution_approval_modal_visible = False
 
             self.started_at = time.time()
             self.last_progress_at = self.started_at
@@ -311,6 +339,9 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             self.git_activity_cache: dict[str, tuple[int, int, int, str, str]] = {}
             self.plan_doc_mtime: dict[Path, float] = {}
             self.last_commentary_key: tuple[str, str] | None = None
+            self.last_timeline_progress_key: tuple[Any, ...] | None = None
+            self.last_commentary_seen_at: dict[tuple[str, str], float] = {}
+            self.last_timeline_seen_at: dict[tuple[Any, ...], float] = {}
             self.commentary_cycle_index: dict[str, int] = {}
 
             self.plan_root_path: Path | None = None
@@ -589,7 +620,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             filled = int(progress_pct / 10)
             bar = "█" * filled + "░" * (10 - filled)
 
-            stage_label = stage_labels.get(self.last_stage, self.last_stage)
+            label = stage_label(self.last_stage)
             mood = "neutral"
             if self.last_outcome in {"complete", "failed"}:
                 mood = self.last_outcome
@@ -625,7 +656,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     [
                         f"Workspace: {self.workspace_name}    Wall clock: {now}",
                         f"Goal: {self.goal or '-'}",
-                        f"Stage: {stage_label}    Current step: {self.current_step}",
+                        f"Stage: {label}    Current step: {self.current_step}",
                         (
                             "Tokens sent/received/total: "
                             f"{format_compact_count(sent)}/"
@@ -833,13 +864,30 @@ def run_textual_tui(cfg: AgentConfig) -> int:
 
             key = str(getattr(event, "key", "")).lower()
             if key in {"y", "enter"}:
-                self.execution_approval_response = True
-                self.awaiting_execution_approval = False
-                self.execution_approval_event.set()
+                self.approve_execution()
             elif key in {"n", "escape", "q"}:
-                self.execution_approval_response = False
-                self.awaiting_execution_approval = False
-                self.execution_approval_event.set()
+                self.deny_execution()
+
+        def _dismiss_approval_modal(self) -> None:
+            if not self.execution_approval_modal_visible:
+                return
+            try:
+                self.pop_screen()
+            except Exception:
+                pass
+            self.execution_approval_modal_visible = False
+
+        def approve_execution(self) -> None:
+            self.execution_approval_response = True
+            self.awaiting_execution_approval = False
+            self.execution_approval_event.set()
+            self._dismiss_approval_modal()
+
+        def deny_execution(self) -> None:
+            self.execution_approval_response = False
+            self.awaiting_execution_approval = False
+            self.execution_approval_event.set()
+            self._dismiss_approval_modal()
 
         def drain_events(self) -> None:
             checks = self.query_one("#checks", DataTable)
@@ -881,16 +929,40 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                         "total_tokens": 0,
                     }
                     self.current_step = snapshot.detail or self.current_step
-                    self.add_event(
-                        "progress",
-                        f"{stage_labels.get(snapshot.stage, snapshot.stage)} — {snapshot.detail}",
+                    normalized_detail = normalize_progress_detail(snapshot.detail)
+                    progress_key = (
+                        snapshot.stage,
+                        normalized_detail,
+                        snapshot.completed_repos,
+                        snapshot.total_repos,
+                        snapshot.failed_repos,
+                        snapshot.retries,
                     )
+                    now_ts = time.time()
+                    timeline_allowed = (
+                        progress_key != self.last_timeline_progress_key
+                        or now_ts - self.last_timeline_seen_at.get(progress_key, 0.0)
+                        >= PROGRESS_REPEAT_COOLDOWN_SEC
+                    )
+                    if timeline_allowed:
+                        self.add_event(
+                            "progress",
+                            f"{stage_label(snapshot.stage)} — {snapshot.detail}",
+                        )
+                        self.last_timeline_seen_at[progress_key] = now_ts
+                    self.last_timeline_progress_key = progress_key
                     cycle = self.commentary_cycle_index.get(snapshot.stage, 0)
                     commentary_text = marvin_commentary_from_progress(snapshot, cycle)
-                    key = (snapshot.stage, snapshot.detail)
-                    if key != self.last_commentary_key:
+                    key = (snapshot.stage, normalized_detail)
+                    commentary_allowed = (
+                        key != self.last_commentary_key
+                        or now_ts - self.last_commentary_seen_at.get(key, 0.0)
+                        >= PROGRESS_REPEAT_COOLDOWN_SEC
+                    )
+                    if commentary_allowed:
                         commentary.write(commentary_text)
                         self.last_commentary_key = key
+                        self.last_commentary_seen_at[key] = now_ts
                         self.commentary_cycle_index[snapshot.stage] = cycle + 1
                         try:
                             commentary.scroll_end(animate=False)
@@ -902,7 +974,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     for repo_name in sorted(status):
                         checks.add_row(
                             repo_name,
-                            repo_status_labels.get(status[repo_name], status[repo_name]),
+                            repo_status_label(status[repo_name]),
                             str(retry_map.get(repo_name, 0)),
                         )
                     active = [
@@ -914,13 +986,24 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     self.awaiting_execution_approval = True
                     self.execution_approval_response = None
                     self.execution_approval_event.clear()
+                    approval_mode = str(payload or "execute")
+                    prompt_text = (
+                        "Execution approval required.\n\n"
+                        f"Mode: {approval_mode}\n"
+                        "Press Y or Enter to proceed with execution.\n"
+                        "Press N, Esc, or Q to cancel execution."
+                    )
                     report.write(
                         "\nExecution approval required, apparently. "
                         "Press 'y' to proceed or 'n' to cancel."
                     )
+                    if not self.execution_approval_modal_visible:
+                        self.push_screen(ExecutionApprovalModal(prompt_text))
+                        self.execution_approval_modal_visible = True
                     self.add_event("approval", "Execution approval requested (y/n)")
                 elif kind == "approval_received":
                     approved = bool(payload)
+                    self._dismiss_approval_modal()
                     if approved:
                         self.add_event("approval", "Execution approved")
                     else:

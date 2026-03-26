@@ -12,6 +12,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage
 
 from .models import InvocationCapture
+from .ursa_compat import load_json_file, save_json_file
 
 
 def to_plain_data(value: Any) -> Any:
@@ -56,14 +57,10 @@ def progress_file(base: Path, rel_path: str) -> Path:
 
 
 def load_exec_progress(base: Path, rel_path: str) -> dict[str, Any]:
-    from ursa.util.plan_execute_utils import load_json_file
-
     return load_json_file(progress_file(base, rel_path), {})
 
 
 def save_exec_progress(base: Path, rel_path: str, payload: dict[str, Any]) -> Path:
-    from ursa.util.plan_execute_utils import save_json_file
-
     path = progress_file(base, rel_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     save_json_file(path, payload)
@@ -78,12 +75,30 @@ def write_text_file(base: Path, rel_path: str, content: str) -> Path:
 
 
 def write_json_file(base: Path, rel_path: str, payload: Any) -> Path:
-    from ursa.util.plan_execute_utils import save_json_file
-
     path = (base / rel_path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     save_json_file(path, payload)
     return path
+
+
+def render_yaml_text(payload: Any) -> str:
+    import yaml
+
+    class _LiteralSafeDumper(yaml.SafeDumper):
+        pass
+
+    def _represent_str(dumper: Any, data: str) -> Any:
+        style = "|" if "\n" in data else None
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+
+    _LiteralSafeDumper.add_representer(str, _represent_str)
+    return yaml.dump(
+        payload,
+        Dumper=_LiteralSafeDumper,
+        sort_keys=False,
+        allow_unicode=False,
+        width=100,
+    )
 
 
 def truncate_tail(text: str, max_chars: int) -> str:
@@ -239,4 +254,5 @@ def invoke_agent(agent: Any, prompt: str, verbose_io: bool) -> InvocationCapture
         content=content,
         captured_stdout=stdout_buffer.getvalue(),
         captured_stderr=stderr_buffer.getvalue(),
+        raw_response=response,
     )

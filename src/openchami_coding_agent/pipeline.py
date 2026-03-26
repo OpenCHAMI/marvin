@@ -16,8 +16,15 @@ from .checkpoints import (
 )
 from .config import default_working_directory, ensure_repo, render_status
 from .execution import execute_plan, extract_repo_sequence_from_plan
-from .models import AgentConfig
-from .plan_tracking import extract_plan_steps, initialize_plan_artifacts, update_tracker_markdown
+from .models import AgentConfig, PlanStep
+from .plan_tracking import (
+    extract_plan_steps,
+    initialize_plan_artifacts,
+    plan_step_names,
+    structured_plan_from_data,
+    structured_plan_from_markdown,
+    update_tracker_markdown,
+)
 from .prompts import build_planner_prompt
 from .reporting import (
     ProgressReporter,
@@ -27,6 +34,14 @@ from .reporting import (
     render_run_progress,
     set_reporter,
     set_workspace_name,
+)
+from .ursa_compat import (
+    get_agent_class,
+    hash_plan,
+    instantiate_agent,
+    load_json_file,
+    setup_llm,
+    timed_input_with_countdown,
 )
 from .utils import (
     extract_agent_status_message,
@@ -40,20 +55,36 @@ from .utils import (
 
 
 def make_agent_llm(config: AgentConfig, role: str):
-    from ursa.util.plan_execute_utils import setup_llm
-
     model_name = config.planner_model if role == "planner" else config.executor_model
     if not model_name:
         raise ValueError(f"No model configured for role '{role}'.")
     role_cfg = (config.defaults or {}).copy()
     role_cfg.update((config.planner if role == "planner" else config.execution) or {})
-    return setup_llm(model_name, role_cfg)
+    return setup_llm(model_name, role_cfg, agent_name=config.agent_name)
+
+
+def _structured_plan_from_invocation(invocation: Any) -> list[PlanStep]:
+    response = invocation.raw_response
+    if not isinstance(response, dict):
+        return []
+
+    plan_obj = response.get("plan")
+    raw_steps = getattr(plan_obj, "steps", None)
+    structured = structured_plan_from_data(raw_steps, source="planner")
+    return structured.steps
+
+
+def _load_structured_steps_from_plan_payload(workspace: Any, rel_path: str) -> list[PlanStep]:
+    payload = load_json_file((workspace / rel_path).resolve(), {})
+    if not isinstance(payload, dict):
+        return []
+    structured = structured_plan_from_data(
+        payload.get("structured_plan") or payload.get("steps") or {}
+    )
+    return structured.steps
 
 
 def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
-    from ursa.agents import PlanningAgent
-    from ursa.util.plan_execute_utils import hash_plan
-
     workspace = cfg.workspace
     if workspace is None:
         raise RuntimeError("Workspace must be set before plan generation.")
@@ -63,7 +94,9 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
     planner_conn = sqlite3.connect(str(planner_db), check_same_thread=False)
     planner_checkpointer = SqliteSaver(planner_conn)
     thread_id = workspace.name
-    planner = PlanningAgent(
+    planning_agent_class = get_agent_class("PlanningAgent")
+    planner = instantiate_agent(
+        planning_agent_class,
         llm=llm,
         checkpointer=planner_checkpointer,
         enable_metrics=True,
@@ -94,19 +127,28 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
     ):
         invocation = invoke_agent(planner, prompt, cfg.verbose_io)
     plan_markdown = invocation.content
+    structured_plan = structured_plan_from_data(
+        _structured_plan_from_invocation(invocation),
+        source="planner",
+    )
+    if not structured_plan.steps:
+        structured_plan = structured_plan_from_markdown(plan_markdown)
     planner_message = extract_brief_model_message(
         plan_markdown,
         fallback="Plan generated.",
     )
+    plan_hash_source = [step.to_payload() for step in structured_plan.steps] or [plan_markdown]
 
     plan_payload = {
         "project": cfg.project,
         "mode": cfg.mode,
+        "planning_mode": cfg.planning_mode,
         "workspace": str(cfg.workspace),
-        "context_claim_name": cfg.context_claim_name,
         "proposal_markdown": cfg.proposal_markdown,
         "plan_markdown": plan_markdown,
-        "plan_hash": hash_plan([plan_markdown]),
+        "plan_hash": hash_plan(plan_hash_source),
+        "structured_plan": structured_plan.to_payload(),
+        "steps": [step.to_payload() for step in structured_plan.steps],
         "token_usage": extract_agent_tokens(planner),
         "repo_sequence_from_plan": extract_repo_sequence_from_plan(
             plan_markdown,
@@ -126,8 +168,6 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
 
 
 def run_pipeline(cfg: AgentConfig) -> int:
-    from ursa.util.plan_execute_utils import hash_plan, timed_input_with_countdown
-
     workspace = cfg.workspace
     if workspace is None:
         raise RuntimeError("Workspace was not resolved from config.")
@@ -174,6 +214,7 @@ def run_pipeline(cfg: AgentConfig) -> int:
             )
 
     plan_markdown: str | None = None
+    structured_steps: list[PlanStep] = []
 
     if cfg.mode in {"plan", "plan_and_execute"}:
         update_tracker_markdown(
@@ -189,7 +230,15 @@ def run_pipeline(cfg: AgentConfig) -> int:
         plan_markdown, plan_payload = generate_plan(cfg)
         plan_md_path = write_text_file(workspace, cfg.proposal_markdown, plan_markdown)
         plan_json_path = write_json_file(workspace, cfg.plan_json, plan_payload)
-        plan_steps = initialize_plan_artifacts(workspace, plan_markdown)
+        structured_plan = structured_plan_from_data(
+            plan_payload.get("structured_plan") or plan_payload.get("steps") or {}
+        )
+        structured_steps = structured_plan.steps
+        plan_steps = initialize_plan_artifacts(
+            workspace,
+            plan_markdown,
+            structured_plan=structured_steps,
+        )
         tracker_path = update_tracker_markdown(
             workspace=workspace,
             stage="planning",
@@ -223,13 +272,20 @@ def run_pipeline(cfg: AgentConfig) -> int:
                 f"Execution mode requires an existing proposal file: {plan_md_path}"
             )
         plan_markdown = plan_md_path.read_text(encoding="utf-8")
-        initialize_plan_artifacts(workspace, plan_markdown)
+        structured_steps = _load_structured_steps_from_plan_payload(workspace, cfg.plan_json)
+        if not structured_steps:
+            structured_steps = structured_plan_from_markdown(plan_markdown).steps
+        initialize_plan_artifacts(
+            workspace,
+            plan_markdown,
+            structured_plan=structured_steps,
+        )
 
     if not plan_markdown:
         raise RuntimeError("No plan markdown available for execution.")
 
     if selected_resume_checkpoint is not None and cfg.mode in {"execute", "plan_and_execute"}:
-        plan_sig = hash_plan([plan_markdown])
+        plan_sig = hash_plan([step.to_payload() for step in structured_steps] or [plan_markdown])
         sync_progress_for_snapshot_single(
             workspace,
             selected_resume_checkpoint,
@@ -260,7 +316,7 @@ def run_pipeline(cfg: AgentConfig) -> int:
             return 1
 
     emit_panel("Executing approved plan with resigned precision.", border_style="magenta")
-    plan_steps = extract_plan_steps(plan_markdown)
+    plan_steps = plan_step_names(structured_steps) or extract_plan_steps(plan_markdown)
     update_tracker_markdown(
         workspace=workspace,
         stage="execution",
@@ -270,7 +326,12 @@ def run_pipeline(cfg: AgentConfig) -> int:
         notes=["Executor launched."],
         reconciliation="Execution in progress.",
     )
-    summary_payload = execute_plan(cfg, plan_markdown, executor_llm=make_agent_llm(cfg, "executor"))
+    summary_payload = execute_plan(
+        cfg,
+        plan_markdown,
+        executor_llm=make_agent_llm(cfg, "executor"),
+        structured_plan=structured_steps,
+    )
     summary_path = write_json_file(workspace, cfg.summary_json, summary_payload)
     emit_text(f"Wrote execution summary: {summary_path}")
     progress_path = progress_file(workspace, cfg.executor_progress_json)

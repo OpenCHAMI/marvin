@@ -6,7 +6,7 @@ import json
 import re
 from pathlib import Path
 
-from ursa.util.plan_execute_utils import snapshot_sqlite_db
+from .ursa_compat import snapshot_sqlite_db
 
 
 def checkpoint_dir(workspace: Path) -> Path:

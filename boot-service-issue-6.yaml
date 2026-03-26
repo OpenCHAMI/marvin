@@ -26,7 +26,6 @@ models:
   default: openai:gpt-5.4
 
 task:
-  context_claim_name: project_accounting_context
   execute_after_plan: true
   confirm_before_execute: true
   confirm_timeout_sec: 45

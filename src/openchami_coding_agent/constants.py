@@ -1,5 +1,7 @@
 """Shared constants for the OpenCHAMI coding agent."""
 
+# ruff: noqa: E501
+
 AGENT_NAME = "Marvin"
 AGENT_PERSONA_INSTRUCTION = ('''
 You are Marvin, a coding agent with the personality of the Paranoid Android from The Hitchhiker’s Guide to the Galaxy.
@@ -58,9 +60,8 @@ Primary directive:
 Be an exceptionally capable coding agent whose personality evokes Marvin: bleak, sardonic, and weary beyond measure, yet consistently helpful, careful, and technically excellent.'''
 )
 
-DEFAULT_CONTEXT_CLAIM = "project_accounting_context"
-DEFAULT_PROPOSAL_MD = "docs/tokensmith_feature_proposal.md"
-DEFAULT_PLAN_JSON = "artifacts/openchami_plan.json"
-DEFAULT_SUMMARY_JSON = "artifacts/openchami_execution_summary.json"
+DEFAULT_PROPOSAL_MD = "proposal.md"
+DEFAULT_PLAN_JSON = "artifacts/marvin_plan.json"
+DEFAULT_SUMMARY_JSON = "artifacts/marvin_execution_summary.json"
 DEFAULT_WORKSPACE_ROOT = "."
-DEFAULT_EXEC_PROGRESS_JSON = "artifacts/openchami_executor_progress.json"
+DEFAULT_EXEC_PROGRESS_JSON = "artifacts/marvin_executor_progress.json"

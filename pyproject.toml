@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "langchain-core>=0.2",
+  "PyYAML>=6.0",
   "rich>=13.7",
   "ursa @ git+https://github.com/lanl/ursa.git",
 ]

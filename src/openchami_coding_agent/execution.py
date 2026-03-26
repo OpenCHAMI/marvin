@@ -6,16 +6,24 @@ import asyncio
 import re
 import sqlite3
 import time
+from collections.abc import Callable
 from typing import Any
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .checkpoints import checkpoint_dir, list_executor_checkpoints, parse_snapshot_indices
-from .models import AgentConfig, CheckExecutionResult, RepoSpec
-from .plan_tracking import extract_plan_steps, read_tracker_activity, update_tracker_markdown
+from .models import AgentConfig, CheckExecutionResult, PlanStep, RepoSpec
+from .plan_tracking import (
+    extract_plan_steps,
+    plan_step_names,
+    read_tracker_activity,
+    update_tracker_markdown,
+)
 from .prompts import build_executor_prompt, build_repo_fix_prompt
 from .reporting import emit_panel, progress_heartbeat, render_check_status, render_run_progress
+from .ursa_compat import get_agent_class, hash_plan, instantiate_agent
 from .utils import (
+    extract_agent_status_message,
     extract_agent_tokens,
     extract_brief_model_message,
     invoke_agent,
@@ -25,6 +33,106 @@ from .utils import (
     save_exec_progress,
     truncate_tail,
 )
+
+
+def build_repair_token_usage_provider(
+    *,
+    base_tokens: dict[str, int],
+    executor: Any,
+) -> Callable[[], dict[str, int]]:
+    def provider() -> dict[str, int]:
+        return merge_tokens(base_tokens, extract_agent_tokens(executor))
+
+    return provider
+
+
+def build_repair_detail_provider(
+    *,
+    workspace: Any,
+    executor: Any,
+    repo_name: str,
+    attempt_num: int,
+    max_check_retries: int,
+) -> Callable[[], str]:
+    def provider() -> str:
+        fallback = f"Attempting repair for {repo_name} ({attempt_num}/{max_check_retries})"
+        model_status = extract_agent_status_message(executor, fallback="")
+        if model_status:
+            return f"{fallback} — {model_status}"
+        return read_tracker_activity(workspace) or fallback
+
+    return provider
+
+
+def _is_git_repo(path: Any) -> bool:
+    repo_path = str(path)
+    code, _, _ = run_command(["git", "-C", repo_path, "rev-parse", "--is-inside-work-tree"])
+    return code == 0
+
+
+def _repo_has_changes(path: Any) -> bool:
+    repo_path = str(path)
+    code, out, _ = run_command(["git", "-C", repo_path, "status", "--porcelain"])
+    return code == 0 and bool(out.strip())
+
+
+def _commit_message_for_step(step_index: int, total_steps: int, step_text: str) -> str:
+    title = re.sub(r"\s+", " ", step_text).strip() or "plan step"
+    if len(title) > 72:
+        title = title[:69].rstrip() + "..."
+    return f"step {step_index + 1}/{total_steps}: {title}"
+
+
+def commit_step_changes(
+    cfg: AgentConfig,
+    *,
+    step_index: int,
+    total_steps: int,
+    step_text: str,
+    step_status: str,
+) -> list[str]:
+    if not cfg.commit_each_step:
+        return []
+
+    commit_message = _commit_message_for_step(step_index, total_steps, step_text)
+    committed_repos: list[str] = []
+    for repo in cfg.repos:
+        if not _is_git_repo(repo.path):
+            continue
+        if not _repo_has_changes(repo.path):
+            continue
+
+        repo_path = str(repo.path)
+        add_code, _, add_err = run_command(["git", "-C", repo_path, "add", "-A"])
+        if add_code != 0:
+            emit_panel(
+                f"{repo.name}: unable to stage changes for step commit.\n{add_err.strip()}",
+                border_style="yellow",
+            )
+            continue
+
+        body = f"Step status: {step_status}" if step_status else ""
+        commit_cmd = ["git", "-C", repo_path, "commit", "-m", commit_message]
+        if body:
+            commit_cmd.extend(["-m", body])
+        commit_code, _, commit_err = run_command(commit_cmd)
+        if commit_code != 0:
+            emit_panel(
+                f"{repo.name}: step commit skipped/failed.\n{commit_err.strip()}",
+                border_style="yellow",
+            )
+            continue
+
+        committed_repos.append(repo.name)
+
+    if committed_repos:
+        emit_panel(
+            "Created step commit(s): "
+            f"{', '.join(committed_repos)}\n"
+            f"Message: {commit_message}",
+            border_style="green",
+        )
+    return committed_repos
 
 
 def extract_repo_sequence_from_plan(plan_markdown: str, repo_names: list[str]) -> list[str]:
@@ -268,10 +376,50 @@ def format_repo_check_failures(result: CheckExecutionResult) -> str:
     return "\n".join(lines)
 
 
-def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dict[str, Any]:
-    from ursa.agents import ExecutionAgent
-    from ursa.util.plan_execute_utils import hash_plan
+def select_execution_agent_class(cfg: AgentConfig) -> type[Any]:
+    execution_agent = get_agent_class("ExecutionAgent")
+    gitgo_agent: type[Any] | None = None
+    try:
+        gitgo_agent = get_agent_class("GitGoAgent", "GitAgent")
+    except ImportError:
+        gitgo_agent = None
 
+    requested_raw = str((cfg.execution or {}).get("executor_agent") or "").strip().lower()
+    requested = requested_raw.replace("_", "").replace("-", "")
+
+    if requested in {"", "auto", "default"}:
+        if (
+            len(cfg.repos) == 1
+            and cfg.repos[0].language.lower() == "go"
+            and gitgo_agent is not None
+        ):
+            return gitgo_agent
+        return execution_agent
+
+    if requested in {"execution", "executionagent"}:
+        return execution_agent
+
+    if requested in {"gitgo", "gitgoagent"}:
+        if gitgo_agent is None:
+            raise ValueError(
+                "execution.executor_agent is set to GitGoAgent, but this URSA build does not "
+                "export GitGoAgent."
+            )
+        return gitgo_agent
+
+    raise ValueError(
+        "Unknown execution.executor_agent value "
+        f"'{requested_raw}'. Supported values: auto/default, execution, gitgo."
+    )
+
+
+def execute_plan(
+    cfg: AgentConfig,
+    plan_markdown: str,
+    executor_llm: Any,
+    *,
+    structured_plan: list[PlanStep] | None = None,
+) -> dict[str, Any]:
     workspace = cfg.workspace
     if workspace is None:
         raise RuntimeError("Workspace must be set before execution.")
@@ -281,7 +429,13 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
     executor_conn = sqlite3.connect(str(executor_db), check_same_thread=False)
     executor_checkpointer = SqliteSaver(executor_conn)
     thread_id = workspace.name
-    executor = ExecutionAgent(
+    execution_agent_class = select_execution_agent_class(cfg)
+    emit_panel(
+        f"Using URSA execution agent: {execution_agent_class.__name__}",
+        border_style="blue",
+    )
+    executor = instantiate_agent(
+        execution_agent_class,
         llm=executor_llm,
         checkpointer=executor_checkpointer,
         enable_metrics=True,
@@ -290,8 +444,9 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
         workspace=str(workspace),
     )
     executor.thread_id = thread_id
-    plan_sig = hash_plan([plan_markdown])
-    plan_steps = extract_plan_steps(plan_markdown)
+    plan_hash_source = [step.to_payload() for step in (structured_plan or [])] or [plan_markdown]
+    plan_sig = hash_plan(plan_hash_source)
+    plan_steps = plan_step_names(structured_plan) or extract_plan_steps(plan_markdown)
     progress = load_exec_progress(workspace, cfg.executor_progress_json)
     plan_hash_matches = progress.get("plan_hash") == plan_sig
     next_step_index = (
@@ -346,6 +501,9 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
             step_base_tokens = token_usage.copy()
 
             def step_execution_detail_provider(activity: str = current_activity) -> str:
+                model_status = extract_agent_status_message(executor, fallback="")
+                if model_status:
+                    return model_status
                 tracker_detail = read_tracker_activity(workspace)
                 return tracker_detail or activity
 
@@ -361,6 +519,7 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
                 token_usage_provider=step_token_usage_provider,
                 total_repos_provider=lambda: len(cfg.repos),
                 start_time=started,
+                interval_sec=2.0,
             ):
                 invocation = invoke_agent(executor, step_prompt, cfg.verbose_io)
 
@@ -368,6 +527,13 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
             step_status = extract_brief_model_message(
                 step_summary,
                 fallback=f"Completed step {step_index + 1}/{len(plan_steps)}.",
+            )
+            committed_repos = commit_step_changes(
+                cfg,
+                step_index=step_index,
+                total_steps=len(plan_steps),
+                step_text=step_text,
+                step_status=step_status,
             )
             summary = (
                 f"{summary}\n\n---\n"
@@ -397,7 +563,15 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
                 ),
                 plan_steps=plan_steps,
                 completed_step_indices=set(range(step_index + 1)),
-                notes=[f"Step {step_index + 1} finished."],
+                notes=[
+                    f"Step {step_index + 1} finished.",
+                    (
+                        "Step commit(s): "
+                        f"{', '.join(committed_repos)}"
+                        if committed_repos
+                        else "Step commit(s): none"
+                    ),
+                ],
                 reconciliation="Step execution advancing in order.",
             )
     else:
@@ -416,6 +590,9 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
         )
 
         def execution_detail_provider() -> str:
+            model_status = extract_agent_status_message(executor, fallback="")
+            if model_status:
+                return model_status
             tracker_detail = read_tracker_activity(workspace)
             return tracker_detail or execution_activity
 
@@ -426,6 +603,7 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
             token_usage_provider=lambda: merge_tokens(token_usage, extract_agent_tokens(executor)),
             total_repos_provider=lambda: len(cfg.repos),
             start_time=started,
+            interval_sec=2.0,
         ):
             invocation = invoke_agent(executor, base_executor_prompt, cfg.verbose_io)
         summary = invocation.content
@@ -636,20 +814,17 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
                 border_style="yellow",
             )
             base_tokens = token_usage.copy()
-
-            def repair_token_usage_provider(
-                tokens: dict[str, int] = base_tokens,
-            ) -> dict[str, int]:
-                return merge_tokens(tokens, extract_agent_tokens(executor))
-
-            def repair_detail_provider(
-                repo_name: str = repo.name,
-                attempt_num: int = attempt + 1,
-            ) -> str:
-                tracker_detail = read_tracker_activity(workspace)
-                if tracker_detail:
-                    return tracker_detail
-                return f"Attempting repair for {repo_name} ({attempt_num}/{cfg.max_check_retries})"
+            token_usage_provider = build_repair_token_usage_provider(
+                base_tokens=base_tokens,
+                executor=executor,
+            )
+            detail_provider = build_repair_detail_provider(
+                workspace=workspace,
+                executor=executor,
+                repo_name=repo.name,
+                attempt_num=attempt + 1,
+                max_check_retries=cfg.max_check_retries,
+            )
 
             repair_activity = (
                 f"Attempting auto-repair for {repo.name} "
@@ -677,13 +852,14 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
                     f"Auto-repair in progress for {repo.name} "
                     f"(attempt {attempt + 1}/{cfg.max_check_retries})"
                 ),
-                detail_provider=repair_detail_provider,
-                token_usage_provider=repair_token_usage_provider,
+                detail_provider=detail_provider,
+                token_usage_provider=token_usage_provider,
                 completed_repos_provider=lambda: len(completed_repos),
                 total_repos_provider=lambda: len(repos_with_checks),
                 failed_repos_provider=lambda: len(failed_repos),
                 retries_provider=lambda: sum(repo_retries.values()),
                 start_time=started,
+                interval_sec=2.0,
             ):
                 fix_invocation = invoke_agent(executor, fix_prompt, cfg.verbose_io)
             fix_summary = fix_invocation.content
@@ -784,7 +960,6 @@ def execute_plan(cfg: AgentConfig, plan_markdown: str, executor_llm: Any) -> dic
     payload = {
         "project": cfg.project,
         "workspace": str(cfg.workspace),
-        "context_claim_name": cfg.context_claim_name,
         "plan_hash": plan_sig,
         "summary": summary,
         "checks": checks,
