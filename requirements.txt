@@ -1,0 +1,6 @@
+langchain-core>=0.2
+langgraph>=1.0
+langgraph-checkpoint-sqlite>=3.0
+PyYAML>=6.0
+rich>=13.7
+textual>=0.79

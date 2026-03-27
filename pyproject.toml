@@ -7,11 +7,14 @@ name = "openchami-coding-agent"
 version = "0.1.0"
 description = "YAML-driven multi-agent coding wrapper for OpenCHAMI using URSA"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
   "langchain-core>=0.2",
+  "langgraph>=1.0",
+  "langgraph-checkpoint-sqlite>=3.0",
   "PyYAML>=6.0",
   "rich>=13.7",
+  "textual>=0.79",
   "ursa @ git+https://github.com/lanl/ursa.git",
 ]
 
@@ -41,14 +44,14 @@ addopts = "-q"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
