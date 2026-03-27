@@ -110,6 +110,7 @@ def test_prompt_builders_include_shared_and_specific_agent_customization(tmp_pat
     assert "expected_outputs" in planner_prompt
     assert "success_criteria" in planner_prompt
     assert "requires_code" in planner_prompt
+    assert "comments should remain" in planner_prompt
 
     assert "You are Ford." in executor_prompt
     assert "Shared agent instructions:\nShared guidance." in executor_prompt
@@ -117,13 +118,16 @@ def test_prompt_builders_include_shared_and_specific_agent_customization(tmp_pat
     assert "Plan digest:" in executor_prompt
     assert "+2 additional step(s) omitted from this prompt for brevity." in executor_prompt
     assert "Plan to execute:" not in executor_prompt
+    assert "Preserve useful existing comments." in executor_prompt
 
     assert "You are Ford, repairing" in repair_prompt
     assert "Shared agent instructions:\nShared guidance." in repair_prompt
     assert "Repair-specific agent instructions:\nRepair guidance." in repair_prompt
     assert "Plan digest:" in repair_prompt
     assert "Validation failure details:" in repair_prompt
+    assert "Preserve useful existing comments." in repair_prompt
     assert len(repair_prompt) < 6000
 
     assert "Overall project:" in subplanner_prompt
+    assert "comments must stay accurate and relevant" in subplanner_prompt
     assert len(subplanner_prompt) < 2500

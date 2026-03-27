@@ -225,6 +225,7 @@ def progress_heartbeat(
             return {}
         return {
             "input_tokens": int(token_data.get("input_tokens", 0) or 0),
+            "cached_input_tokens": int(token_data.get("cached_input_tokens", 0) or 0),
             "output_tokens": int(token_data.get("output_tokens", 0) or 0),
             "total_tokens": int(token_data.get("total_tokens", 0) or 0),
         }

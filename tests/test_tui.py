@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from textual.widgets import Static
+
 from openchami_coding_agent.models import ProgressSnapshot
 from openchami_coding_agent.tui import (
     _completion_personality_line,
@@ -26,6 +28,7 @@ def test_token_stage_report_lines_formats_known_stages() -> None:
                     "count": 3,
                     "prompt_estimated_tokens": 1200,
                     "input_tokens": 1800,
+                    "cached_input_tokens": 1500,
                     "output_tokens": 400,
                     "total_tokens": 2200,
                 },
@@ -42,6 +45,7 @@ def test_token_stage_report_lines_formats_known_stages() -> None:
 
     assert lines[0].startswith("- Executing: calls=3")
     assert "prompt~1200" in lines[0]
+    assert "cache=83.3%" in lines[0]
     assert any("Repairing: calls=1" in line for line in lines)
 
 
@@ -79,6 +83,7 @@ def test_build_completion_summary_text_includes_stage_rollups_and_hotspots() -> 
             "failed_repos": [],
             "token_usage": {
                 "input_tokens": 1000,
+                "cached_input_tokens": 750,
                 "output_tokens": 250,
                 "total_tokens": 1250,
             },
@@ -106,6 +111,10 @@ def test_build_completion_summary_text_includes_stage_rollups_and_hotspots() -> 
 
     assert "Token stage breakdown:" in text
     assert "Highest-cost invocations:" in text
+    assert (
+        "Cache effectiveness: cached 750 of 1000 sent tokens "
+        "(75% hit rate, 250 uncached)." in text
+    )
     assert "Executing: calls=2" in text
     assert "1. Executing: step 1/2" in text
 
@@ -163,6 +172,37 @@ def test_build_token_report_text_shows_live_and_summary_sections() -> None:
     assert "Per-stage rollups:" in text
     assert "Highest-cost invocations:" in text
     assert "Observation:" in text
+
+
+def test_build_token_report_text_mentions_cached_tokens_when_present() -> None:
+    text = build_token_report_text(
+        workspace_name="marvin-ws",
+        stage="execution",
+        planning_mode="single",
+        current_step="step 1/2",
+        current_repo="svc",
+        checkpoint_label="-",
+        repo_progress="0/1",
+        failures=0,
+        retries=0,
+        token_usage={
+            "input_tokens": 1200,
+            "cached_input_tokens": 900,
+            "output_tokens": 300,
+            "total_tokens": 1500,
+        },
+        token_delta_usage={
+            "input_tokens": 200,
+            "cached_input_tokens": 180,
+            "output_tokens": 40,
+            "total_tokens": 240,
+        },
+        elapsed_sec=15,
+        payload={},
+    )
+
+    assert "sent/cached/received/total" in text
+    assert "1200/900/300/1500" in text
 
 
 def test_token_observation_notices_repair_heaviness() -> None:
@@ -307,3 +347,9 @@ def test_format_commentary_log_entry_includes_timestamp_and_text() -> None:
     )
 
     assert entry == "[2026-03-27 12:34:56] Inspecting repository state before editing.\n"
+
+
+def test_token_report_static_uses_plain_text_mode() -> None:
+    widget = Static("Preparing token report…", markup=False)
+
+    assert widget._render_markup is False

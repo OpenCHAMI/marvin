@@ -69,6 +69,7 @@ def progress_snapshot_key(snapshot: ProgressSnapshot) -> tuple[Any, ...]:
         snapshot.failed_repos,
         snapshot.retries,
         int(snapshot.token_usage.get("input_tokens", 0)),
+        int(snapshot.token_usage.get("cached_input_tokens", 0)),
         int(snapshot.token_usage.get("output_tokens", 0)),
         int(snapshot.token_usage.get("total_tokens", 0)),
         round(snapshot.elapsed_sec or 0.0, 1),

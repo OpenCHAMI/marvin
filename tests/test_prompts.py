@@ -1,0 +1,129 @@
+from pathlib import Path
+
+from openchami_coding_agent.models import AgentConfig, PlanStep, RepoSpec
+from openchami_coding_agent.prompts import (
+    build_executor_control_suffix,
+    build_executor_prompt,
+    build_executor_step_prompt,
+    build_planner_control_suffix,
+    build_planner_prompt_from_prefix,
+    build_planner_prompt_prefix,
+    build_repo_fix_control_suffix,
+    build_repo_fix_prompt_prefix,
+    build_subplanner_control_suffix,
+    build_subplanner_prompt_from_prefix,
+    build_subplanner_prompt_prefix,
+)
+
+
+def _cfg() -> AgentConfig:
+    return AgentConfig(
+        project="OpenCHAMI",
+        problem="Implement cache-aware prompt shaping.",
+        workspace=Path("/tmp/marvin-ws"),
+        repos=[RepoSpec(name="svc", path=Path("/tmp/marvin-ws/repos/svc"))],
+        execution_requirements=["Keep prompts deterministic."],
+    )
+
+
+def test_build_executor_step_prompt_preserves_base_prefix() -> None:
+    cfg = _cfg()
+    plan = [PlanStep(name="Inspect", description="Inspect current prompt builders.")]
+    base_prompt = build_executor_prompt(cfg, "1. Inspect", structured_plan=plan)
+
+    prompt = build_executor_step_prompt(
+        base_prompt,
+        step_detail="Inspect\nInspect current prompt builders.",
+        step_index=1,
+        total_steps=3,
+    )
+
+    assert prompt.startswith(base_prompt)
+    assert build_executor_control_suffix(
+        step_detail="Inspect\nInspect current prompt builders.",
+        step_index=1,
+        total_steps=3,
+    ) in prompt
+
+
+def test_build_repo_fix_prompt_prefix_excludes_failure_details() -> None:
+    cfg = _cfg()
+    repo = cfg.repos[0]
+
+    prefix = build_repo_fix_prompt_prefix(cfg, repo, "1. Inspect")
+
+    assert "Validation failure details:" not in prefix
+    assert "Repair control:" not in prefix
+    assert "Preserve useful existing comments." in prefix
+
+
+def test_build_repo_fix_control_suffix_is_only_dynamic_repair_context() -> None:
+    suffix = build_repo_fix_control_suffix("tests failed in auth handler", 2)
+
+    assert suffix.startswith("Repair control:")
+    assert "Attempt: 2" in suffix
+    assert "tests failed in auth handler" in suffix
+
+
+def test_build_planner_prompt_prefix_excludes_task_context() -> None:
+    cfg = _cfg()
+
+    prefix = build_planner_prompt_prefix(cfg)
+
+    assert "Planning context:" not in prefix
+    assert f"Project: {cfg.project}" not in prefix
+    assert "Available repositories:" not in prefix
+
+
+def test_build_planner_prompt_from_prefix_appends_dynamic_context() -> None:
+    cfg = _cfg()
+    prefix = build_planner_prompt_prefix(cfg)
+
+    prompt = build_planner_prompt_from_prefix(prefix, cfg=cfg)
+
+    assert prompt.startswith(prefix)
+    assert build_planner_control_suffix(cfg) in prompt
+    assert "comments should remain" in prompt
+
+
+def test_build_subplanner_prompt_prefix_excludes_main_step_context() -> None:
+    cfg = _cfg()
+
+    prefix = build_subplanner_prompt_prefix(cfg)
+
+    assert "Subplanning context:" not in prefix
+    assert "Current main step to expand:" not in prefix
+    assert "comments must stay accurate and relevant" in prefix
+
+
+def test_build_subplanner_prompt_from_prefix_appends_main_step_context() -> None:
+    cfg = _cfg()
+    prefix = build_subplanner_prompt_prefix(cfg)
+    main_step = PlanStep(name="Inspect", description="Inspect current prompt builders.")
+
+    prompt = build_subplanner_prompt_from_prefix(
+        prefix,
+        cfg=cfg,
+        main_step=main_step,
+        main_step_index=1,
+        total_main_steps=3,
+    )
+
+    assert prompt.startswith(prefix)
+    assert (
+        build_subplanner_control_suffix(
+            cfg,
+            main_step=main_step,
+            main_step_index=1,
+            total_main_steps=3,
+        )
+        in prompt
+    )
+
+
+def test_build_executor_prompt_includes_comment_preservation_rule() -> None:
+    cfg = _cfg()
+    prompt = build_executor_prompt(cfg, "1. Inspect")
+
+    assert "Preserve useful existing comments." in prompt
+    assert "accurate and relevant to the code they describe" in prompt

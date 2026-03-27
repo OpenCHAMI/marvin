@@ -27,7 +27,7 @@ from .plan_tracking import (
     structured_plan_from_markdown,
     update_tracker_markdown,
 )
-from .prompts import build_planner_prompt
+from .prompts import build_planner_prompt_from_prefix, build_planner_prompt_prefix
 from .reporting import (
     ProgressReporter,
     emit_panel,
@@ -46,9 +46,11 @@ from .ursa_compat import (
     timed_input_with_countdown,
 )
 from .utils import (
+    build_token_cache_summary,
     extract_agent_status_message,
     extract_agent_tokens,
     extract_brief_model_message,
+    format_cache_hit_ratio,
     invoke_agent,
     progress_file,
     write_json_file,
@@ -96,7 +98,8 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
         workspace=str(workspace),
     )
     planner.thread_id = thread_id
-    prompt = build_planner_prompt(cfg)
+    planner_prompt_prefix = build_planner_prompt_prefix(cfg)
+    prompt = build_planner_prompt_from_prefix(planner_prompt_prefix, cfg=cfg)
     latest_planner_feedback = {"text": ""}
 
     def planning_detail_provider() -> str:
@@ -343,6 +346,9 @@ def run_pipeline(cfg: AgentConfig) -> int:
         planner_llm=make_agent_llm(cfg, "planner"),
         structured_plan=structured_steps,
     )
+    cache_summary = summary_payload.get("token_cache_summary") or build_token_cache_summary(
+        summary_payload.get("token_usage") or {}
+    )
     summary_path = write_json_file(workspace, cfg.summary_json, summary_payload)
     emit_text(f"Wrote execution summary: {summary_path}")
     progress_path = progress_file(workspace, cfg.executor_progress_json)
@@ -361,6 +367,12 @@ def run_pipeline(cfg: AgentConfig) -> int:
                     f"{int((summary_payload.get('token_usage') or {}).get('input_tokens', 0))}/"
                     f"{int((summary_payload.get('token_usage') or {}).get('output_tokens', 0))}/"
                     f"{int((summary_payload.get('token_usage') or {}).get('total_tokens', 0))}"
+                ),
+                (
+                    "- Cache reuse: "
+                    f"{int(cache_summary.get('cached_input_tokens', 0))}/"
+                    f"{int(cache_summary.get('input_tokens', 0))} sent tokens reused "
+                    f"({format_cache_hit_ratio(cache_summary.get('cache_hit_ratio', 0.0))})"
                 ),
                 f"- Duration: {summary_payload.get('duration_sec', '-')}s",
             ]

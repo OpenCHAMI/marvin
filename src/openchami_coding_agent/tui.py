@@ -24,7 +24,13 @@ from .models import AgentConfig, ProgressSnapshot
 from .pipeline import run_pipeline_with_reporter
 from .progress_view import build_progress_display, repo_status_label, stage_label
 from .reporting import ProgressReporter
-from .utils import format_compact_count, format_elapsed_runtime, token_delta
+from .utils import (
+    build_token_cache_summary,
+    format_cache_hit_ratio,
+    format_compact_count,
+    format_elapsed_runtime,
+    token_delta,
+)
 
 PROGRESS_REPEAT_COOLDOWN_SEC = 15.0
 BODY_RESIZE_KEY_STEP_PERCENT = 4.0
@@ -33,10 +39,32 @@ _TOKEN_STAGE_ORDER = ["planning", "subplanning", "execution", "repair"]
 
 
 def _format_token_triplet(tokens: dict[str, Any]) -> str:
+    sent = format_compact_count(int(tokens.get("input_tokens", 0)))
+    cached = int(tokens.get("cached_input_tokens", 0) or 0)
+    received = format_compact_count(int(tokens.get("output_tokens", 0)))
+    total = format_compact_count(int(tokens.get("total_tokens", 0)))
+    if cached:
+        return f"{sent}/{format_compact_count(cached)}/{received}/{total}"
+    return f"{sent}/{received}/{total}"
+
+
+def _token_triplet_label(tokens: dict[str, Any]) -> str:
+    if int(tokens.get("cached_input_tokens", 0) or 0):
+        return "sent/cached/received/total"
+    return "sent/received/total"
+
+
+def _cache_summary_text(summary: dict[str, Any]) -> str:
+    sent = int(summary.get("input_tokens", 0) or 0)
+    cached = int(summary.get("cached_input_tokens", 0) or 0)
+    uncached = int(summary.get("uncached_input_tokens", 0) or 0)
+    ratio = format_cache_hit_ratio(summary.get("cache_hit_ratio", 0.0))
+    if sent <= 0:
+        return "Cache effectiveness: no prompt tokens recorded yet."
     return (
-        f"{format_compact_count(int(tokens.get('input_tokens', 0)))}/"
-        f"{format_compact_count(int(tokens.get('output_tokens', 0)))}/"
-        f"{format_compact_count(int(tokens.get('total_tokens', 0)))}"
+        "Cache effectiveness: "
+        f"cached {format_compact_count(cached)} of {format_compact_count(sent)} sent "
+        f"tokens ({ratio} hit rate, {format_compact_count(uncached)} uncached)."
     )
 
 
@@ -268,11 +296,13 @@ def token_stage_report_lines(payload: dict[str, Any]) -> list[str]:
         values = raw.get(stage) or {}
         if not isinstance(values, dict):
             continue
+        cache_summary = build_token_cache_summary(values)
         lines.append(
             "- "
             f"{stage_label(stage)}: calls={int(values.get('count', 0))} | "
             f"prompt~{format_compact_count(int(values.get('prompt_estimated_tokens', 0)))} | "
-            f"tokens={_format_token_triplet(values)}"
+            f"tokens={_format_token_triplet(values)} | "
+            f"cache={format_cache_hit_ratio(cache_summary.get('cache_hit_ratio', 0.0))}"
         )
     return lines or ["- Stage rollups will appear after the execution summary is written."]
 
@@ -301,10 +331,18 @@ def token_hotspot_lines(payload: dict[str, Any], *, limit: int = 5) -> list[str]
         stage = stage_label(str(event.get("stage") or "unknown"))
         repo_name = str(event.get("repo") or "").strip()
         repo_suffix = f" | repo={repo_name}" if repo_name else ""
+        cache_summary = build_token_cache_summary(event)
+        cache_suffix = ""
+        if int(cache_summary.get("input_tokens", 0) or 0) > 0:
+            cache_suffix = (
+                " | cache="
+                f"{format_cache_hit_ratio(cache_summary.get('cache_hit_ratio', 0.0))}"
+            )
         lines.append(
             f"{index}. {stage}: {label}{repo_suffix} | "
             f"prompt~{format_compact_count(int(event.get('prompt_estimated_tokens', 0)))} | "
             f"total={format_compact_count(int(event.get('total_tokens', 0)))}"
+            f"{cache_suffix}"
         )
     return lines
 
@@ -316,6 +354,7 @@ def build_completion_summary_text(workspace_name: str, payload: dict[str, Any]) 
     duration = payload.get("duration_sec")
     summary = str(payload.get("summary") or "<no summary available>")
     summary_tail = summary[-900:] if len(summary) > 900 else summary
+    cache_summary = payload.get("token_cache_summary") or build_token_cache_summary(tokens)
 
     return "\n".join(
         [
@@ -324,7 +363,8 @@ def build_completion_summary_text(workspace_name: str, payload: dict[str, Any]) 
             f"Workspace: {workspace_name}",
             f"Completed repos: {', '.join(completed) if completed else '-'}",
             f"Failed repos: {', '.join(failed) if failed else '-'}",
-            f"Tokens sent/received/total: {_format_token_triplet(tokens)}",
+            f"Tokens {_token_triplet_label(tokens)}: {_format_token_triplet(tokens)}",
+            _cache_summary_text(cache_summary),
             f"Duration: {format_elapsed_runtime(duration)}",
             "",
             "Token stage breakdown:",
@@ -372,8 +412,14 @@ def build_token_report_text(
         f"Focus: {current_step or '-'}",
         f"Repo: {current_repo or '-'}    Checkpoint: {checkpoint_label or '-'}",
         f"Repo progress: {repo_progress}    Failures: {failures}    Retries: {retries}",
-        f"Cumulative sent/received/total: {_format_token_triplet(token_usage)}",
-        f"Last delta sent/received/total: {_format_token_triplet(token_delta_usage)}",
+        (
+            f"Cumulative {_token_triplet_label(token_usage)}: "
+            f"{_format_token_triplet(token_usage)}"
+        ),
+        (
+            f"Last delta {_token_triplet_label(token_delta_usage)}: "
+            f"{_format_token_triplet(token_delta_usage)}"
+        ),
         f"Elapsed: {format_elapsed_runtime(elapsed_sec)}",
         "",
         "Per-stage rollups:",
@@ -689,9 +735,9 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             ]
             self.git_activity_cache: dict[str, tuple[int, int, int, str, str]] = {}
             self.plan_doc_mtime: dict[Path, float] = {}
-            self.last_commentary_key: tuple[str, str] | None = None
+            self.last_commentary_key: tuple[str, str, str] | None = None
             self.last_timeline_progress_key: tuple[Any, ...] | None = None
-            self.last_commentary_seen_at: dict[tuple[str, str], float] = {}
+            self.last_commentary_seen_at: dict[tuple[str, str, str], float] = {}
             self.last_timeline_seen_at: dict[tuple[Any, ...], float] = {}
             self.commentary_cycle_index: dict[str, int] = {}
             self.body_resize_dragging = False
@@ -744,7 +790,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                 with TabPane("Git", id="tab_git"):
                     yield DataTable(id="git_activity")
                 with TabPane("Tokens", id="tab_tokens"):
-                    yield Static("Preparing token report…", id="token_report")
+                    yield Static("Preparing token report…", id="token_report", markup=False)
                 with TabPane("Diagnostics", id="tab_diag"):
                     yield RichLog(id="report", wrap=True, highlight=False)
                 with TabPane("Raw Log", id="tab_raw"):
@@ -1096,12 +1142,6 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             elapsed = int(now_ts - self.started_at)
             since_update = int(now_ts - self.last_progress_at)
             now = datetime.now().strftime("%H:%M:%S")
-            sent = int(self.last_token_usage.get("input_tokens", 0))
-            received = int(self.last_token_usage.get("output_tokens", 0))
-            total = int(self.last_token_usage.get("total_tokens", 0))
-            delta_sent = int(self.last_token_delta.get("input_tokens", 0))
-            delta_received = int(self.last_token_delta.get("output_tokens", 0))
-            delta_total = int(self.last_token_delta.get("total_tokens", 0))
 
             progress_pct = 0
             if self.plan_total > 0:
@@ -1156,13 +1196,10 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                             f"Checkpoint: {self.last_checkpoint_label}"
                         ),
                         (
-                            "Tokens sent/received/total: "
-                            f"{format_compact_count(sent)}/"
-                            f"{format_compact_count(received)}/"
-                            f"{format_compact_count(total)}    Last delta: "
-                            f"{format_compact_count(delta_sent)}/"
-                            f"{format_compact_count(delta_received)}/"
-                            f"{format_compact_count(delta_total)}    "
+                            f"Tokens {_token_triplet_label(self.last_token_usage)}: "
+                            f"{_format_token_triplet(self.last_token_usage)}    "
+                            f"Last delta {_token_triplet_label(self.last_token_delta)}: "
+                            f"{_format_token_triplet(self.last_token_delta)}    "
                             f"Elapsed: {format_elapsed_runtime(float(elapsed))}    "
                             f"Last update: {format_elapsed_runtime(float(since_update))} ago"
                         ),

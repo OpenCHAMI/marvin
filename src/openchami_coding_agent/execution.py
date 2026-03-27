@@ -21,10 +21,18 @@ from .plan_tracking import (
     structured_plan_from_data,
     update_tracker_markdown,
 )
-from .prompts import build_executor_prompt, build_repo_fix_prompt, build_subplanner_prompt
+from .prompts import (
+    build_executor_prompt,
+    build_executor_step_prompt,
+    build_repo_fix_prompt_from_prefix,
+    build_repo_fix_prompt_prefix,
+    build_subplanner_prompt_from_prefix,
+    build_subplanner_prompt_prefix,
+)
 from .reporting import emit_panel, progress_heartbeat, render_check_status, render_run_progress
 from .ursa_compat import get_agent_class, hash_plan, instantiate_agent, snapshot_sqlite_db
 from .utils import (
+    build_token_cache_summary,
     estimate_prompt_tokens,
     extract_agent_status_message,
     extract_agent_tokens,
@@ -442,24 +450,26 @@ def _record_token_event(
     sub_step: int | None = None,
     repo_name: str | None = None,
 ) -> None:
-    events.append(
-        {
-            "stage": stage,
-            "label": label,
-            "main_step": main_step,
-            "sub_step": sub_step,
-            "repo": repo_name,
-            "prompt_chars": len(prompt),
-            "prompt_estimated_tokens": estimate_prompt_tokens(prompt),
-            "input_tokens": int(delta.get("input_tokens", 0)),
-            "output_tokens": int(delta.get("output_tokens", 0)),
-            "total_tokens": int(delta.get("total_tokens", 0)),
-        }
-    )
+    event = {
+        "stage": stage,
+        "label": label,
+        "main_step": main_step,
+        "sub_step": sub_step,
+        "repo": repo_name,
+        "prompt_chars": len(prompt),
+        "prompt_estimated_tokens": estimate_prompt_tokens(prompt),
+        "input_tokens": int(delta.get("input_tokens", 0)),
+        "output_tokens": int(delta.get("output_tokens", 0)),
+        "total_tokens": int(delta.get("total_tokens", 0)),
+    }
+    cached_input_tokens = int(delta.get("cached_input_tokens", 0) or 0)
+    if "cached_input_tokens" in delta or cached_input_tokens:
+        event["cached_input_tokens"] = cached_input_tokens
+    events.append(event)
 
 
-def summarize_token_events(events: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
-    summary: dict[str, dict[str, int]] = {}
+def summarize_token_events(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    summary: dict[str, dict[str, Any]] = {}
     for event in events:
         stage = str(event.get("stage") or "unknown")
         bucket = summary.setdefault(
@@ -477,8 +487,15 @@ def summarize_token_events(events: list[dict[str, Any]]) -> dict[str, dict[str, 
         bucket["prompt_chars"] += int(event.get("prompt_chars", 0) or 0)
         bucket["prompt_estimated_tokens"] += int(event.get("prompt_estimated_tokens", 0) or 0)
         bucket["input_tokens"] += int(event.get("input_tokens", 0) or 0)
+        cached_input_tokens = int(event.get("cached_input_tokens", 0) or 0)
+        if "cached_input_tokens" in event or cached_input_tokens:
+            if "cached_input_tokens" not in bucket:
+                bucket["cached_input_tokens"] = 0
+            bucket["cached_input_tokens"] += cached_input_tokens
         bucket["output_tokens"] += int(event.get("output_tokens", 0) or 0)
         bucket["total_tokens"] += int(event.get("total_tokens", 0) or 0)
+    for bucket in summary.values():
+        bucket.update(build_token_cache_summary(bucket))
     return summary
 
 
@@ -552,8 +569,10 @@ def _generate_subplan(
             return model_status
         return planning_activity
 
-    subplan_prompt = build_subplanner_prompt(
-        cfg,
+    subplanner_prompt_prefix = build_subplanner_prompt_prefix(cfg)
+    subplan_prompt = build_subplanner_prompt_from_prefix(
+        subplanner_prompt_prefix,
+        cfg=cfg,
         main_step=main_step,
         main_step_index=main_step_index,
         total_main_steps=total_main_steps,
@@ -796,15 +815,17 @@ def execute_plan(
                     fallback="No prior sub-step summary.",
                     max_chars=240,
                 )
-                step_prompt = (
-                    f"{base_executor_prompt}\n\n"
-                    "Execution control:\n"
-                    f"- Current main step: {step_to_text(main_step)}\n"
-                    f"- Execute ONLY this sub-step now: {sub_index + 1}/{len(sub_steps)}\n"
-                    f"- Current sub-step detail: {step_to_text(sub_step)}\n"
-                    f"- Previous sub-step summary: {previous_summary_brief}\n"
-                    "- Do not start later main steps or later sub-steps in this invocation.\n"
-                    "- Return a concise summary of changes made for this sub-step."
+                step_prompt = build_executor_step_prompt(
+                    base_executor_prompt,
+                    step_detail=step_to_text(sub_step),
+                    step_index=sub_index + 1,
+                    total_steps=len(sub_steps),
+                    previous_summary_brief=previous_summary_brief,
+                    main_step_detail=step_to_text(main_step),
+                    main_step_index=main_index + 1,
+                    total_main_steps=len(materialized_steps),
+                    sub_step_index=sub_index + 1,
+                    total_sub_steps=len(sub_steps),
                 )
 
                 current_activity = execution_activity
@@ -973,13 +994,11 @@ def execute_plan(
                 reconciliation="Executor working through ordered plan steps.",
             )
 
-            step_prompt = (
-                f"{base_executor_prompt}\n\n"
-                "Execution control:\n"
-                f"- Execute ONLY this step now: {step_index + 1}/{len(plan_steps)}\n"
-                f"- Step detail: {step_to_text(step)}\n"
-                "- Do not start later steps in this invocation.\n"
-                "- Return a concise summary of changes made for this step."
+            step_prompt = build_executor_step_prompt(
+                base_executor_prompt,
+                step_detail=step_to_text(step),
+                step_index=step_index + 1,
+                total_steps=len(plan_steps),
             )
 
             current_activity = execution_activity
@@ -1354,18 +1373,25 @@ def execute_plan(
         if attempt >= cfg.max_check_retries:
             break
 
+        repair_prompt_prefixes = {
+            repo.name: build_repo_fix_prompt_prefix(
+                cfg,
+                repo,
+                plan_markdown,
+                structured_plan=materialized_steps,
+            )
+            for repo in repos_with_checks
+        }
+
         for repo in repos_with_checks:
             if repo.name not in failed_map:
                 continue
             repo_retries[repo.name] = repo_retries.get(repo.name, 0) + 1
             executor_baseline = extract_agent_tokens(executor)
-            fix_prompt = build_repo_fix_prompt(
-                cfg,
-                repo,
-                plan_markdown,
-                format_repo_check_failures(failed_map[repo.name]),
+            fix_prompt = build_repo_fix_prompt_from_prefix(
+                repair_prompt_prefixes[repo.name],
+                failure_text=format_repo_check_failures(failed_map[repo.name]),
                 attempt=attempt + 1,
-                structured_plan=materialized_steps,
             )
             emit_panel(
                 (
@@ -1525,6 +1551,7 @@ def execute_plan(
     )
 
     final_stage = "complete" if all_checks_passed else "failed"
+    cache_summary = build_token_cache_summary(token_usage)
     update_tracker_markdown(
         workspace=workspace,
         stage=final_stage,
@@ -1540,6 +1567,8 @@ def execute_plan(
             (
                 "Token totals: "
                 f"input={token_usage.get('input_tokens', 0)}, "
+                f"cached={token_usage.get('cached_input_tokens', 0)}, "
+                f"uncached={cache_summary.get('uncached_input_tokens', 0)}, "
                 f"output={token_usage.get('output_tokens', 0)}, "
                 f"total={token_usage.get('total_tokens', 0)}"
             ),
@@ -1564,6 +1593,7 @@ def execute_plan(
         "failed_repos": sorted(failed_repos),
         "all_checks_passed": all_checks_passed,
         "token_usage": token_usage,
+        "token_cache_summary": cache_summary,
         "token_events": token_events,
         "token_usage_by_stage": summarize_token_events(token_events),
         "duration_sec": duration_sec,
