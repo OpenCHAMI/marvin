@@ -1,9 +1,14 @@
+from langchain_core.messages import AIMessage, HumanMessage
+
 from openchami_coding_agent.utils import (
     estimate_prompt_tokens,
     extract_brief_model_message,
+    extract_stream_chunk_message,
+    extract_structured_feedback_text,
     format_compact_count,
     format_elapsed_runtime,
     format_token_counts,
+    invoke_agent,
     merge_tokens,
     slugify,
     token_delta,
@@ -79,3 +84,109 @@ def test_extract_brief_model_message_uses_first_meaningful_line() -> None:
 
 def test_extract_brief_model_message_falls_back_when_empty() -> None:
     assert extract_brief_model_message("   ", fallback="fallback") == "fallback"
+
+
+def test_extract_stream_chunk_message_prefers_assistant_message() -> None:
+    chunk = {
+        "messages": [
+            HumanMessage(content="do the thing"),
+            AIMessage(content="Inspecting repository state before editing."),
+        ]
+    }
+
+    assert extract_stream_chunk_message(chunk) == "Inspecting repository state before editing."
+
+
+def test_extract_structured_feedback_text_humanizes_step_payloads() -> None:
+    text = extract_structured_feedback_text(
+        {
+            "steps": [
+                {
+                    "name": "inspect",
+                    "description": "Inspect config_init.py and identify prompt construction.",
+                },
+                {
+                    "name": "patch",
+                    "description": (
+                        "Update the streamed feedback formatter to unwrap "
+                        "step descriptions."
+                    ),
+                },
+            ]
+        }
+    )
+
+    assert "Planned steps:" in text
+    assert "inspect: Inspect config_init.py and identify prompt construction" in text
+    assert "patch: Update the streamed feedback formatter" in text
+
+
+def test_extract_stream_chunk_message_humanizes_json_strings() -> None:
+    chunk = {
+        "message": (
+            '{"steps": [{"description": "Inspect repository state before editing."}, '
+            '{"description": "Apply the change and run focused tests."}]}'
+        )
+    }
+
+    text = extract_stream_chunk_message(chunk)
+
+    assert text.startswith("Planned steps:")
+    assert "Inspect repository state before editing" in text
+
+
+def test_extract_stream_chunk_message_humanizes_json_in_assistant_message() -> None:
+    chunk = {
+        "messages": [
+            HumanMessage(content="do the thing"),
+            AIMessage(
+                content=(
+                    '{"steps": ['
+                    "{\"name\": \"inspect\", \"description\": "
+                    "\"Inspect repository and map current token APIs.\"}, "
+                    "{\"name\": \"patch\", \"description\": "
+                    "\"Update the token formatter and rerun tests.\"}"
+                    ']}'
+                )
+            ),
+        ]
+    }
+
+    text = extract_stream_chunk_message(chunk, max_chars=None)
+
+    assert text.startswith("Planned steps:")
+    assert "inspect: Inspect repository and map current token APIs" in text
+    assert "patch: Update the token formatter and rerun tests" in text
+
+
+def test_invoke_agent_uses_stream_and_emits_feedback() -> None:
+    feedback: list[str] = []
+
+    class FakeStreamingAgent:
+        def stream(self, inputs):
+            assert inputs["messages"][0].content == "do the thing"
+            yield {
+                "messages": [
+                    HumanMessage(content="do the thing"),
+                    AIMessage(content="Inspecting repository state before editing."),
+                ]
+            }
+            yield {
+                "messages": [
+                    HumanMessage(content="do the thing"),
+                    AIMessage(content="Applied the change and ran focused tests."),
+                ]
+            }
+
+    invocation = invoke_agent(
+        FakeStreamingAgent(),
+        "do the thing",
+        verbose_io=False,
+        feedback_callback=feedback.append,
+    )
+
+    assert feedback == [
+        "Inspecting repository state before editing.",
+        "Applied the change and ran focused tests.",
+    ]
+    assert invocation.content == "Applied the change and ran focused tests."

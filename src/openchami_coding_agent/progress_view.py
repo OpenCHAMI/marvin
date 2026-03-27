@@ -56,6 +56,8 @@ def progress_snapshot_key(snapshot: ProgressSnapshot) -> tuple[Any, ...]:
         snapshot.stage,
         snapshot.planning_mode,
         snapshot.detail,
+        snapshot.base_detail,
+        snapshot.agent_feedback,
         snapshot.current_main_step,
         snapshot.current_main_total,
         snapshot.current_sub_step,

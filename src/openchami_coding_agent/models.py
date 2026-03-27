@@ -223,6 +223,8 @@ class InvocationCapture:
 class ProgressSnapshot:
     stage: str
     detail: str
+    base_detail: str = ""
+    agent_feedback: str = ""
     workspace: str | None = None
     planning_mode: str = "single"
     current_main_step: int | None = None

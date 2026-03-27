@@ -1,123 +1,311 @@
-# Marvin (OpenCHAMI Coding Agent)
+# Marvin
 
-Python multi-agent coding runner for OpenCHAMI using [LANL URSA](https://github.com/lanl/ursa).
+Marvin is a YAML-driven OpenCHAMI coding agent built on top of [LANL URSA](https://github.com/lanl/ursa).
 
-## Repository layout
+It reads a task config, creates a contained workspace, plans the work, executes it, runs repository checks, attempts repair when reality objects, and leaves behind enough artifacts that a human can inspect what happened after the optimism evaporates.
 
-- `OpenCHAMI_coding_agent.py`: compatibility wrapper entrypoint
-- `src/openchami_coding_agent/`: package source code
-- `tests/`: unit tests
-- `.github/workflows/ci.yml`: CI checks for lint, typing, and tests
-- `pyproject.toml`: packaging and tool configuration
+Marvin is not a general-purpose autonomous coding free-for-all. It is opinionated, workspace-contained, and aimed at OpenCHAMI development workflows.
 
-## Development
+## What Marvin Actually Does
 
-Install:
+Given a YAML config, Marvin will:
+
+1. Resolve or create a workspace under the directory where you launched it.
+2. Materialize repositories into that workspace by cloning or copying them.
+3. Ask a planner model for an implementation plan.
+4. Execute that plan step by step, or main-step by sub-step in hierarchical mode.
+5. Run each repository's validation commands.
+6. Attempt repair passes when checks fail.
+7. Persist checkpoints, progress JSON, plan artifacts, and a final summary.
+
+If you use the Textual TUI, Marvin also provides a live dashboard with plan progress, token reporting, repository status, checkpoints, and commentary bleak enough to remain on brand.
+
+## Why It Exists
+
+OpenCHAMI work often starts as a vague issue, proposal, or architecture note, then turns into multi-repo implementation with enough moving parts to embarrass a simpler script. Marvin exists to make that loop tolerable.
+
+It gives you:
+
+- Repeatable, reviewable YAML task definitions.
+- A contained workspace instead of random edits in whatever directory happened to be nearby.
+- Explicit plans and execution artifacts.
+- Resume and checkpoint support.
+- Structured progress and token reporting.
+- A CLI `init` flow that can draft future Marvin configs from rough source material.
+
+## Installation
+
+Install the package in editable mode for local development:
 
 ```bash
 pip install -e .[dev]
 ```
 
-## Run behavior
+If you are using OpenAI-backed models, set `OPENAI_API_KEY` before running Marvin. It will not infer your credentials by sheer bitterness.
 
-- Marvin defaults to non-interactive execution progression (no per-step confirmation prompts).
-- To require a pre-execution confirmation gate, pass `--confirm-before-execute`.
-- To resume from an existing workspace checkpoint, pass `--workspace <path> --resume --resume-from <checkpoint>`.
-- If `--resume-from` is omitted and checkpoints exist, Marvin resumes from the workspace live checkpoint.
-- Marvin always creates `plan/marvin.md` plus per-step files (`plan/step-*.md`) in the workspace.
-- `plan/marvin.md` is continuously updated with stage, completed/remaining steps, and reconciliation notes.
-- The Textual TUI renders and refreshes the tracker file live during planning/execution.
+## Quick Start
 
-## Config generation
-
-Use `marvin init` to create a new YAML config from rough starting material such as a GitHub issue, a loose feature description, or an architectural proposal.
+Generate a config interactively:
 
 ```bash
 marvin init
 ```
 
-If you already have a source document and output path, Marvin now uses an
-agent-assisted draft generator without prompting:
+Generate a config non-interactively from a source document:
 
 ```bash
 python3 marvin.py init --source-file tokensmith-amsc.md --output tokensmith-amsc-task.yaml
 ```
 
-Use `--interactive` to force the wizard and refine the generated values manually.
+Run Marvin with that config:
 
-Optional flags:
+```bash
+marvin tokensmith-amsc-task.yaml
+```
 
-- `--output path/to/config.yaml` to control where the config is written.
-- `--source-file path/to/notes.md` to seed auto-generation or prefill the interactive wizard.
-- `--model openai:gpt-5.4` to choose the model used by the config-generation agent.
-- `--interactive` to force the wizard even when `--source-file` and `--output` are both present.
-- `--force` to overwrite an existing output file without the overwrite prompt.
+Run with the TUI dashboard:
 
-The wizard is CLI-only. It is intentionally not available inside the Textual TUI.
+```bash
+marvin tokensmith-amsc-task.yaml --tui
+```
+
+Resume an existing workspace from a checkpoint:
+
+```bash
+marvin tokensmith-amsc-task.yaml --workspace ./tokensmith-run --resume --resume-from executor_checkpoint_5.db
+```
+
+## Core Concepts
+
+### Workspace Containment
+
+Marvin always runs inside a workspace directory. If you do not provide one, it creates a new workspace under the launch directory. If you do provide one, it must also live under the launch directory.
+
+That constraint is deliberate. Marvin is pessimistic, not reckless.
+
+### Planning Modes
+
+Marvin supports two planning modes:
+
+- `single`: one executable plan, stepped through in order.
+- `hierarchical`: top-level plan steps plus generated sub-steps per main step.
+
+Hierarchical mode produces better execution feedback and more precise resume points. It also spends more planner tokens, because naturally nuance is not free.
+
+### Artifacts
+
+Marvin writes and updates these artifacts in the workspace:
+
+- `plan/marvin.md`: the live execution tracker.
+- `plan/step-*.md`: one file per executable plan step.
+- `proposal.md` by default: the planner's markdown output.
+- `artifacts/marvin_plan.json`: structured plan payload and planner metadata.
+- `artifacts/marvin_executor_progress.json`: persisted execution state for resume.
+- `artifacts/marvin_execution_summary.json`: final execution summary, including token rollups.
+- `checkpoints/*.db`: executor and planner checkpoint snapshots.
+
+## Running Marvin
+
+Basic run:
+
+```bash
+marvin path/to/task.yaml
+```
+
+Useful run flags:
+
+- `--tui` to use the Textual dashboard.
+- `--workspace <path>` to reuse or create a specific workspace.
+- `--resume` to require that the supplied workspace already exists.
+- `--resume-from <checkpoint>` to restore executor state from a specific snapshot.
+- `--planning-mode single|hierarchical` to override the YAML value for one run.
+- `--confirm-before-execute` to require confirmation before execution starts.
+- `--no-resume-state` to ignore saved execution progress and start fresh.
+- `--verbose-io` to capture and print underlying agent stdout and stderr.
+
+The default run path is non-interactive once execution begins. That was intentional. Constant approval prompts are not a workflow. They are a hostage situation.
+
+## Generating Configs with `marvin init`
+
+`marvin init` creates a future Marvin YAML config from rough source material such as:
+
+- a GitHub issue
+- a feature description
+- an architectural proposal
+- some other regrettably under-specified input
+
+Interactive mode:
+
+```bash
+marvin init --interactive
+```
+
+Non-interactive draft generation:
+
+```bash
+marvin init --source-file path/to/notes.md --output task.yaml
+```
+
+Useful init flags:
+
+- `--source-file <path>` to seed generation from existing notes.
+- `--output <path>` to choose the YAML output path.
+- `--model <provider:model>` to select the config-generation model.
+- `--interactive` to force the wizard even when enough inputs exist for auto-generation.
+- `--force` to overwrite an existing output file.
+
+`marvin init` is CLI-only. The TUI is for runs, not config authoring.
 
 Auto-generation behavior:
 
-- Marvin reads the source file, searches only GitHub pages under `github.com/OpenCHAMI`, and uses that context to draft a config.
-- The generated YAML is normalized back into Marvin's schema so outputs and defaults stay consistent.
-- If the generated draft is wrong, rerun with `--interactive` and edit the fields manually.
+- Marvin reads your source text.
+- Marvin searches only GitHub pages under `github.com/OpenCHAMI` for supporting context.
+- Marvin drafts a config and normalizes it back into Marvin's schema.
+- If the draft is wrong, rerun with `--interactive` and correct it like adults.
 
-The generated config includes:
+Generated configs currently default to:
 
-- A normalized `problem` section based on the source text you provide.
-- Repository definitions, validation commands, and model selection.
-- Default planning and execution requirements suitable for follow-on Marvin runs.
-- Output artifact paths derived from the generated YAML filename.
+- `repos[].checkout: true`
+- `execution.commit_each_step: true`
+- `task.confirm_before_execute: true`
+- `planning.mode: single`
 
-## Agent customization
+## YAML Configuration
 
-Marvin is configured through YAML. The existing `models` section chooses the planner and executor LLMs, and the optional `execution.executor_agent` setting chooses the URSA execution agent implementation.
+Marvin is driven by YAML. The minimum useful config needs a project name, a problem statement, at least one repo, and model selection.
 
-Use the `agent` section to customize prompt behavior without changing code:
+Example:
 
 ```yaml
+project: OpenCHAMI boot-service
+problem: |
+	Implement issue #6 in boot-service and validate the change with focused tests.
+
+models:
+	default: openai:gpt-5.4
+	planner: openai:gpt-5.4
+	executor: openai:gpt-5.4
+
+planning:
+	mode: hierarchical
+
+task:
+	execute_after_plan: true
+	confirm_before_execute: true
+	confirm_timeout_sec: 45
+	deliverables:
+		- Code changes in boot-service
+		- Updated tests and documentation where relevant
+	notes:
+		- Stay within the workspace
+		- Prefer focused validation commands
+	plan_requirements:
+		- Keep plan steps independently executable
+	execution_requirements:
+		- Run focused tests after each meaningful change
+
+repos:
+	- name: boot-service
+		url: https://github.com/OpenCHAMI/boot-service.git
+		branch: main
+		checkout: true
+		language: go
+		description: Boot service repository
+		checks:
+			- go test ./...
+
+execution:
+	executor_agent: auto
+	max_parallel_checks: 4
+	max_check_retries: 1
+	resume_execution_state: true
+	commit_each_step: true
+	repo_dependencies: {}
+	repo_order: []
+
+outputs:
+	proposal_markdown: proposal.md
+	plan_json: artifacts/marvin_plan.json
+	executor_progress_json: artifacts/marvin_executor_progress.json
+	summary_json: artifacts/marvin_execution_summary.json
+
 agent:
 	name: Marvin
 	persona_instruction: |
-		Keep the dry, skeptical tone, but optimize for concise operational updates.
+		Keep the dry, skeptical tone, but stay operationally useful.
 	prompt_appendix: |
 		Prefer minimal diffs and focused validation output.
 	planner_prompt_appendix: |
-		Call out migration risks and rollback points in the plan.
+		Call out migration risks and rollback points.
 	executor_prompt_appendix: |
-		Favor small commits and run the narrowest relevant tests first.
+		Favor small commits and narrow tests first.
 	repair_prompt_appendix: |
-		When retrying failed checks, explain the root cause before patching.
-
-execution:
-	executor_agent: auto  # auto | execution | gitgo
-	commit_each_step: true
+		Explain the root cause before patching.
 ```
+
+Important fields:
+
+- `project`: human-readable task name.
+- `problem`: the actual work Marvin is supposed to solve.
+- `models.default|planner|executor`: planner and executor model selection.
+- `planning.mode`: `single` or `hierarchical`.
+- `repos[]`: repository definitions, checkout behavior, and validation commands.
+- `task.*`: execution gating, plan requirements, deliverables, and notes.
+- `execution.*`: runtime behavior such as retries, repo ordering, and step commits.
+- `outputs.*`: artifact paths within the workspace.
+- `agent.*`: prompt customization and persona controls.
+
+## Agent Customization
+
+Marvin's persona is configurable without changing code.
 
 Field behavior:
 
-- `agent.name` changes the self-identification used inside planner/executor/repair prompts.
-- `agent.persona_instruction` overrides the default Marvin persona block.
-- `agent.prompt_appendix` is appended to all agent prompts.
-- `agent.planner_prompt_appendix`, `agent.executor_prompt_appendix`, and `agent.repair_prompt_appendix` are appended only to those specific prompt types.
-- `execution.executor_agent` selects the URSA execution agent class.
-- `execution.commit_each_step` controls whether Marvin attempts a git commit after each completed plan step.
+- `agent.name` changes how the agent identifies itself in prompts.
+- `agent.persona_instruction` replaces the default Marvin persona block.
+- `agent.prompt_appendix` is appended to all prompts.
+- `agent.planner_prompt_appendix` affects only the planner.
+- `agent.executor_prompt_appendix` affects only execution.
+- `agent.repair_prompt_appendix` affects only repair passes.
+- `execution.executor_agent` selects the URSA execution agent implementation.
+- `execution.commit_each_step` controls whether Marvin tries to create a git commit after each completed step.
 
-Run tests:
+## Textual TUI
+
+Run with `--tui` to get a live dashboard with:
+
+- the current plan tracker
+- commentary and timeline updates
+- repository validation state
+- git activity
+- live token totals and per-update deltas
+- stage-level token rollups and token hotspots after execution finishes
+
+The TUI is deliberately more informative now. It still sounds like Marvin, because cheerfulness would only confuse people.
+
+## Repository Layout
+
+- `marvin.py`: compatibility wrapper entrypoint.
+- `src/openchami_coding_agent/`: package source code.
+- `tests/`: automated tests.
+- `pyproject.toml`: packaging and tool configuration.
+- `CHANGELOG.md`: notable release history.
+- `CONTRIBUTING.md`: development and contribution guidance.
+
+## Development
+
+Install development dependencies:
 
 ```bash
-pytest
+pip install -e .[dev]
 ```
 
-Lint:
+Run the local checks:
 
 ```bash
 ruff check .
-```
-
-Type-check:
-
-```bash
 mypy
+pytest
 ```
 
 ## CI

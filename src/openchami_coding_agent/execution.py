@@ -61,9 +61,12 @@ def build_repair_detail_provider(
     repo_name: str,
     attempt_num: int,
     max_check_retries: int,
+    live_feedback: dict[str, str] | None = None,
 ) -> Callable[[], str]:
     def provider() -> str:
         fallback = f"Attempting repair for {repo_name} ({attempt_num}/{max_check_retries})"
+        if live_feedback and live_feedback.get("text"):
+            return f"{fallback} — {live_feedback['text']}"
         model_status = extract_agent_status_message(executor, fallback="")
         if model_status:
             return f"{fallback} — {model_status}"
@@ -539,8 +542,11 @@ def _generate_subplan(
         f"Planning sub-steps for main step {main_step_index}/{total_main_steps}: "
         f"{main_step.name}"
     )
+    latest_planner_feedback = {"text": ""}
 
     def subplanning_detail_provider() -> str:
+        if latest_planner_feedback["text"]:
+            return latest_planner_feedback["text"]
         model_status = extract_agent_status_message(planner, fallback="")
         if model_status:
             return model_status
@@ -568,8 +574,17 @@ def _generate_subplan(
         total_repos_provider=lambda: len(cfg.repos),
         start_time=started,
         interval_sec=2.0,
-    ):
-        invocation = invoke_agent(planner, subplan_prompt, verbose_io)
+    ) as emit_progress_update:
+        def on_subplanner_feedback(text: str) -> None:
+            latest_planner_feedback["text"] = text
+            emit_progress_update(text, agent_feedback_override=text)
+
+        invocation = invoke_agent(
+            planner,
+            subplan_prompt,
+            verbose_io,
+            feedback_callback=on_subplanner_feedback,
+        )
 
     normalized = structured_plan_from_agent_response(
         invocation.raw_response,
@@ -795,8 +810,14 @@ def execute_plan(
                 current_activity = execution_activity
                 step_base_tokens = token_usage.copy()
                 executor_baseline = extract_agent_tokens(executor)
+                latest_executor_feedback = {"text": ""}
 
-                def step_execution_detail_provider(activity: str = current_activity) -> str:
+                def step_execution_detail_provider(
+                    activity: str = current_activity,
+                    live_feedback: dict[str, str] = latest_executor_feedback,
+                ) -> str:
+                    if live_feedback["text"]:
+                        return live_feedback["text"]
                     model_status = extract_agent_status_message(executor, fallback="")
                     if model_status:
                         return model_status
@@ -825,8 +846,20 @@ def execute_plan(
                     total_repos_provider=lambda: len(cfg.repos),
                     start_time=started,
                     interval_sec=2.0,
-                ):
-                    invocation = invoke_agent(executor, step_prompt, cfg.verbose_io)
+                ) as emit_progress_update:
+                    def on_executor_feedback(
+                        text: str,
+                        live_feedback: dict[str, str] = latest_executor_feedback,
+                    ) -> None:
+                        live_feedback["text"] = text
+                        emit_progress_update(text, agent_feedback_override=text)
+
+                    invocation = invoke_agent(
+                        executor,
+                        step_prompt,
+                        cfg.verbose_io,
+                        feedback_callback=on_executor_feedback,
+                    )
 
                 step_summary = invocation.content.strip()
                 step_status = extract_brief_model_message(
@@ -952,8 +985,14 @@ def execute_plan(
             current_activity = execution_activity
             step_base_tokens = token_usage.copy()
             executor_baseline = extract_agent_tokens(executor)
+            latest_executor_feedback = {"text": ""}
 
-            def step_execution_detail_provider(activity: str = current_activity) -> str:
+            def step_execution_detail_provider(
+                activity: str = current_activity,
+                live_feedback: dict[str, str] = latest_executor_feedback,
+            ) -> str:
+                if live_feedback["text"]:
+                    return live_feedback["text"]
                 model_status = extract_agent_status_message(executor, fallback="")
                 if model_status:
                     return model_status
@@ -977,8 +1016,20 @@ def execute_plan(
                 total_repos_provider=lambda: len(cfg.repos),
                 start_time=started,
                 interval_sec=2.0,
-            ):
-                invocation = invoke_agent(executor, step_prompt, cfg.verbose_io)
+            ) as emit_progress_update:
+                def on_executor_feedback(
+                    text: str,
+                    live_feedback: dict[str, str] = latest_executor_feedback,
+                ) -> None:
+                    live_feedback["text"] = text
+                    emit_progress_update(text, agent_feedback_override=text)
+
+                invocation = invoke_agent(
+                    executor,
+                    step_prompt,
+                    cfg.verbose_io,
+                    feedback_callback=on_executor_feedback,
+                )
 
             step_summary = invocation.content.strip()
             step_status = extract_brief_model_message(
@@ -1058,6 +1109,8 @@ def execute_plan(
         )
 
         def execution_detail_provider() -> str:
+            if latest_executor_feedback["text"]:
+                return latest_executor_feedback["text"]
             model_status = extract_agent_status_message(executor, fallback="")
             if model_status:
                 return model_status
@@ -1065,6 +1118,7 @@ def execute_plan(
             return tracker_detail or execution_activity
 
         executor_baseline = extract_agent_tokens(executor)
+        latest_executor_feedback = {"text": ""}
         with progress_heartbeat(
             stage="execution",
             detail=execution_activity,
@@ -1076,8 +1130,17 @@ def execute_plan(
             total_repos_provider=lambda: len(cfg.repos),
             start_time=started,
             interval_sec=2.0,
-        ):
-            invocation = invoke_agent(executor, base_executor_prompt, cfg.verbose_io)
+        ) as emit_progress_update:
+            def on_executor_feedback(text: str) -> None:
+                latest_executor_feedback["text"] = text
+                emit_progress_update(text, agent_feedback_override=text)
+
+            invocation = invoke_agent(
+                executor,
+                base_executor_prompt,
+                cfg.verbose_io,
+                feedback_callback=on_executor_feedback,
+            )
         summary = invocation.content
         fallback_status = extract_brief_model_message(
             summary,
@@ -1312,6 +1375,7 @@ def execute_plan(
                 border_style="yellow",
             )
             base_tokens = token_usage.copy()
+            latest_repair_feedback = {"text": ""}
             token_usage_provider = build_repair_token_usage_provider(
                 base_tokens=base_tokens,
                 agent_baseline=executor_baseline,
@@ -1323,6 +1387,7 @@ def execute_plan(
                 repo_name=repo.name,
                 attempt_num=attempt + 1,
                 max_check_retries=cfg.max_check_retries,
+                live_feedback=latest_repair_feedback,
             )
 
             repair_activity = (
@@ -1361,8 +1426,20 @@ def execute_plan(
                 retries_provider=lambda: sum(repo_retries.values()),
                 start_time=started,
                 interval_sec=2.0,
-            ):
-                fix_invocation = invoke_agent(executor, fix_prompt, cfg.verbose_io)
+            ) as emit_progress_update:
+                def on_repair_feedback(
+                    text: str,
+                    live_feedback: dict[str, str] = latest_repair_feedback,
+                ) -> None:
+                    live_feedback["text"] = text
+                    emit_progress_update(text, agent_feedback_override=text)
+
+                fix_invocation = invoke_agent(
+                    executor,
+                    fix_prompt,
+                    cfg.verbose_io,
+                    feedback_callback=on_repair_feedback,
+                )
             fix_summary = fix_invocation.content
             fix_status = extract_brief_model_message(
                 fix_summary,

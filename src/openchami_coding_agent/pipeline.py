@@ -97,8 +97,11 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
     )
     planner.thread_id = thread_id
     prompt = build_planner_prompt(cfg)
+    latest_planner_feedback = {"text": ""}
 
     def planning_detail_provider() -> str:
+        if latest_planner_feedback["text"]:
+            return latest_planner_feedback["text"]
         return extract_agent_status_message(
             planner,
             fallback="Planning in progress.",
@@ -115,8 +118,17 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
         detail_provider=planning_detail_provider,
         token_usage_provider=lambda: extract_agent_tokens(planner),
         total_repos_provider=lambda: len(cfg.repos),
-    ):
-        invocation = invoke_agent(planner, prompt, cfg.verbose_io)
+    ) as emit_progress_update:
+        def on_planner_feedback(text: str) -> None:
+            latest_planner_feedback["text"] = text
+            emit_progress_update(text, agent_feedback_override=text)
+
+        invocation = invoke_agent(
+            planner,
+            prompt,
+            cfg.verbose_io,
+            feedback_callback=on_planner_feedback,
+        )
     plan_markdown = invocation.content
     structured_plan = structured_plan_from_agent_response(
         invocation.raw_response,

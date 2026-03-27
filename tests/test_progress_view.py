@@ -62,6 +62,12 @@ def test_progress_snapshot_key_changes_with_step_context() -> None:
     assert progress_snapshot_key(left) != progress_snapshot_key(right)
 
 
+def test_progress_snapshot_key_changes_with_agent_feedback() -> None:
+    left = ProgressSnapshot(stage="execution", detail="x", agent_feedback="thinking")
+    right = ProgressSnapshot(stage="execution", detail="x", agent_feedback="editing")
+    assert progress_snapshot_key(left) != progress_snapshot_key(right)
+
+
 def test_shared_label_helpers_fallback_to_input() -> None:
     assert stage_label("unknown") == "unknown"
     assert repo_status_label("mystery") == "mystery"

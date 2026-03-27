@@ -27,6 +27,7 @@ from .reporting import ProgressReporter
 from .utils import format_compact_count, format_elapsed_runtime, token_delta
 
 PROGRESS_REPEAT_COOLDOWN_SEC = 15.0
+BODY_RESIZE_KEY_STEP_PERCENT = 4.0
 
 _TOKEN_STAGE_ORDER = ["planning", "subplanning", "execution", "repair"]
 
@@ -52,6 +53,38 @@ def _progress_focus_phrase(snapshot: ProgressSnapshot) -> str:
     if snapshot.checkpoint_label:
         parts.append(f"checkpoint {snapshot.checkpoint_label}")
     return ", ".join(parts)
+
+
+def _clip_commentary_text(text: str, *, max_chars: int = 260) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "").strip())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 3].rstrip() + "..."
+
+
+def nudge_body_split(plan_width_percent: float, delta_percent: float) -> float:
+    return plan_width_percent + delta_percent
+
+
+def raw_commentary_log_path(workspace: Path | None, summary_json: str) -> Path | None:
+    if workspace is None:
+        return None
+
+    summary_path = (workspace / summary_json).resolve()
+    stem = summary_path.stem
+    if stem.endswith("-summary"):
+        stem = stem[: -len("-summary")] + "-raw-commentary"
+    elif stem.endswith("_summary"):
+        stem = stem[: -len("_summary")] + "_raw_commentary"
+    else:
+        stem = stem + "_raw_commentary"
+    return summary_path.with_name(f"{stem}.log")
+
+
+def format_commentary_log_entry(text: str, *, timestamp: str | None = None) -> str:
+    rendered_text = (text or "").strip() or "<empty commentary>"
+    stamp = timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"[{stamp}] {rendered_text}\n"
 
 
 def _progress_pressure_phrase(snapshot: ProgressSnapshot) -> str:
@@ -169,6 +202,46 @@ def build_marvin_commentary_from_progress(
         clauses.append(detail)
 
     return ". ".join(clause.rstrip(" .") for clause in clauses if clause).strip() + "."
+
+
+def build_operational_context(snapshot: ProgressSnapshot) -> str:
+    lines: list[str] = []
+    focus = _progress_focus_phrase(snapshot)
+    pressure = _progress_pressure_phrase(snapshot)
+    primary_detail = (snapshot.base_detail or snapshot.detail or "").strip()
+
+    if focus:
+        lines.append(f"Focus: {focus}")
+    if pressure:
+        lines.append(pressure)
+    if primary_detail:
+        lines.append(_clip_commentary_text(primary_detail, max_chars=320))
+    if snapshot.detail:
+        detail = snapshot.detail.strip()
+        if detail and detail not in {primary_detail, snapshot.agent_feedback.strip()}:
+            lines.append(_clip_commentary_text(detail, max_chars=320))
+
+    return "\n".join(line for line in lines if line)
+
+
+def build_commentary_tabs(snapshot: ProgressSnapshot, cycle_index: int = 0) -> dict[str, str]:
+    raw_commentary = (
+        snapshot.agent_feedback or snapshot.detail or snapshot.base_detail or ""
+    ).strip()
+    if not raw_commentary:
+        raw_commentary = "Waiting for direct agent commentary."
+
+    return {
+        "raw": raw_commentary,
+        "marvin": build_marvin_commentary_from_progress(snapshot, cycle_index),
+        "context": build_operational_context(snapshot),
+    }
+
+
+def build_commentary_entry(snapshot: ProgressSnapshot, cycle_index: int = 0) -> str:
+    tabs = build_commentary_tabs(snapshot, cycle_index)
+    ordered_sections = [tabs["raw"], tabs["marvin"], tabs["context"]]
+    return "\n\n".join(section for section in ordered_sections if section.strip())
 
 
 def load_summary_payload(workspace: Path | None, summary_json: str) -> dict[str, Any]:
@@ -322,8 +395,10 @@ def run_textual_tui(cfg: AgentConfig) -> int:
         raise RuntimeError("Textual is not available. Install with: pip install textual") from exc
 
     AppBase = textual_app.App
+    Container = textual_containers.Container
     Horizontal = textual_containers.Horizontal
     ModalScreenBase = textual_screen.ModalScreen
+    VerticalScroll = textual_containers.VerticalScroll
 
     DataTable = textual_widgets.DataTable
     Footer = textual_widgets.Footer
@@ -470,6 +545,8 @@ def run_textual_tui(cfg: AgentConfig) -> int:
 
     class MarvinTUIApp(AppBase):  # type: ignore[misc, valid-type]
         BINDINGS = [
+            ("left", "resize_split_left", "Pane: more commentary"),
+            ("right", "resize_split_right", "Pane: more plan"),
             ("a", "filter_all", "Timeline: all"),
             ("e", "filter_errors", "Timeline: errors"),
             ("p", "filter_progress", "Timeline: progress"),
@@ -504,20 +581,43 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             margin: 0 0 1 0;
             min-height: 14;
         }
-        #plan_markdown {
-            width: 2fr;
-            min-width: 50;
+        #plan_panel {
+            width: 39%;
+            min-width: 34;
             border: round $secondary;
-            padding: 0 1;
-            margin: 0 1 0 0;
+            padding: 0 1 0 1;
             overflow-y: auto;
         }
-        #commentary {
+        #plan_markdown {
             width: 1fr;
-            min-width: 36;
+            height: auto;
+            min-height: 100%;
+        }
+        #body_resize_handle {
+            width: 1;
+            min-width: 1;
+            margin: 0 1;
+            color: $accent;
+            background: $panel;
+            content-align: center middle;
+            text-style: bold;
+        }
+        #body_resize_handle.-dragging {
+            background: $accent 20%;
+            color: $text;
+        }
+        #commentary_panel {
+            width: 1fr;
+            min-width: 54;
             border: round $accent;
-            padding: 0 1;
-            overflow-y: auto;
+            padding: 0;
+            overflow: hidden;
+        }
+        #commentary_tabs {
+            height: 1fr;
+        }
+        #raw_commentary, #marvin_commentary, #context_commentary {
+            height: 1fr;
         }
         #footer_tabs {
             height: 19;
@@ -594,6 +694,14 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             self.last_commentary_seen_at: dict[tuple[str, str], float] = {}
             self.last_timeline_seen_at: dict[tuple[Any, ...], float] = {}
             self.commentary_cycle_index: dict[str, int] = {}
+            self.body_resize_dragging = False
+            self.body_resize_origin_screen_x = 0
+            self.body_resize_origin_percent = 39.0
+            self.body_plan_width_percent = 39.0
+            self.raw_commentary_log_path = raw_commentary_log_path(
+                cfg.workspace,
+                cfg.summary_json,
+            )
 
             self.plan_root_path: Path | None = None
             self.plan_current_path: Path | None = None
@@ -610,11 +718,23 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                 yield Static("Starting Marvin dashboard…", id="header_stats")
 
             with Horizontal(id="body_row"):
-                yield Markdown(
-                    "# Plan Tracker\n\nWaiting for `plan/marvin.md`…",
-                    id="plan_markdown",
-                )
-                yield RichLog(id="commentary", wrap=True, highlight=False)
+                with VerticalScroll(id="plan_panel", can_focus=True):
+                    yield Markdown(
+                        "# Plan Tracker\n\nWaiting for `plan/marvin.md`…",
+                        id="plan_markdown",
+                    )
+                yield Static("||", id="body_resize_handle")
+                with Container(id="commentary_panel"):
+                    with TabbedContent(
+                        initial="tab_raw_commentary",
+                        id="commentary_tabs",
+                    ):
+                        with TabPane("Raw Commentary", id="tab_raw_commentary"):
+                            yield RichLog(id="raw_commentary", wrap=True, highlight=False)
+                        with TabPane("Marvin View", id="tab_marvin_commentary"):
+                            yield RichLog(id="marvin_commentary", wrap=True, highlight=False)
+                        with TabPane("Run Context", id="tab_context_commentary"):
+                            yield RichLog(id="context_commentary", wrap=True, highlight=False)
 
             with TabbedContent(id="footer_tabs"):
                 with TabPane("Timeline", id="tab_timeline"):
@@ -642,20 +762,27 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             git_activity = self.query_one("#git_activity", DataTable)
             git_activity.add_columns("Repo", "Branch", "Files", "+", "-", "Last Commit")
 
+            plan_panel = self.query_one("#plan_panel", VerticalScroll)
+            commentary_panel = self.query_one("#commentary_panel", Container)
+            commentary_tabs = self.query_one("#commentary_tabs", TabbedContent)
+            raw_commentary = self.query_one("#raw_commentary", RichLog)
+            marvin_commentary = self.query_one("#marvin_commentary", RichLog)
+            context_commentary = self.query_one("#context_commentary", RichLog)
             report = self.query_one("#report", RichLog)
-            commentary = self.query_one("#commentary", RichLog)
             plan_markdown = self.query_one("#plan_markdown", Markdown)
             timeline = self.query_one("#timeline", DataTable)
             checks = self.query_one("#checks", DataTable)
             git_activity = self.query_one("#git_activity", DataTable)
             token_report = self.query_one("#token_report", Static)
 
-            plan_markdown.border_title = "Plan (plan/marvin.md)"
-            commentary.border_title = "Marvin Commentary"
+            plan_panel.border_title = "Plan (plan/marvin.md)"
+            commentary_panel.border_title = "Commentary"
+            commentary_tabs.active = "tab_raw_commentary"
             timeline.border_title = "Timeline"
             checks.border_title = "Checks"
             git_activity.border_title = "Git Activity"
             token_report.border_title = "Token Report"
+            plan_markdown.show_vertical_scrollbar = False
 
             api_key_present = bool(os.getenv("OPENAI_API_KEY"))
             report.write("Diagnostics")
@@ -668,13 +795,27 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             report.write("- Executor model: " + (cfg.executor_model or "<not set>"))
             report.write("- OPENAI_API_KEY: " + ("set" if api_key_present else "missing"))
             report.write(
-                "- Shortcuts: a/e/p/k/d/u/g filters, f cycle filter, ? help, q quit"
+                "- Raw commentary log: "
+                + (
+                    str(self.raw_commentary_log_path)
+                    if self.raw_commentary_log_path is not None
+                    else "<workspace not set>"
+                )
             )
-            commentary.write(
-                "Marvin commentary online. I will provide the emotional damage; "
-                "the status panels will provide the facts."
+            report.write(
+                "- Shortcuts: left/right resize panes, a/e/p/k/d/u/g filters, "
+                "f cycle filter, ? help, q quit"
+            )
+            raw_commentary.write("Waiting for direct agent commentary.")
+            self._write_raw_commentary_log("Waiting for direct agent commentary.")
+            marvin_commentary.write(
+                "Commentary online. I will provide the emotional damage when progress arrives."
+            )
+            context_commentary.write(
+                "Run context will accumulate here once the pipeline starts moving."
             )
             token_report.update(self._token_report_text())
+            self._apply_body_split(self.body_plan_width_percent)
 
             self.set_interval(0.2, self.drain_events)
             self.set_interval(1.0, self.refresh_header_stats)
@@ -683,10 +824,10 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             threading.Thread(target=self.run_pipeline, daemon=True).start()
 
         def _set_plan_border_title(self) -> None:
-            markdown = self.query_one("#plan_markdown", Markdown)
+            plan_panel = self.query_one("#plan_panel", VerticalScroll)
             workspace = cfg.workspace
             if workspace is None or self.plan_current_path is None:
-                markdown.border_title = "Plan"
+                plan_panel.border_title = "Plan"
                 return
             try:
                 rel = self.plan_current_path.resolve().relative_to(workspace.resolve())
@@ -694,7 +835,93 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             except Exception:
                 label = str(self.plan_current_path)
             suffix = "  [b: back]" if self.plan_history else ""
-            markdown.border_title = f"Plan ({label}){suffix}"
+            plan_panel.border_title = f"Plan ({label}){suffix}"
+
+        def _apply_body_split(self, plan_width_percent: float) -> None:
+            body_row = self.query_one("#body_row", Horizontal)
+            plan_panel = self.query_one("#plan_panel", VerticalScroll)
+            commentary_panel = self.query_one("#commentary_panel", Container)
+            handle = self.query_one("#body_resize_handle", Static)
+
+            available_width = max(1, body_row.size.width - handle.size.width - 2)
+            min_plan_percent = min(70.0, max(18.0, (34 / available_width) * 100))
+            max_plan_percent = max(
+                min_plan_percent,
+                min(82.0, 100.0 - ((54 / available_width) * 100)),
+            )
+            clamped = max(min_plan_percent, min(plan_width_percent, max_plan_percent))
+
+            self.body_plan_width_percent = clamped
+            plan_panel.styles.width = f"{clamped:.2f}%"
+            commentary_panel.styles.width = "1fr"
+
+        def on_mouse_down(self, event) -> None:
+            if getattr(event, "button", 0) != 1:
+                return
+            widget = getattr(event, "widget", None)
+            if getattr(widget, "id", None) != "body_resize_handle":
+                return
+
+            handle = self.query_one("#body_resize_handle", Static)
+            self.body_resize_dragging = True
+            self.body_resize_origin_screen_x = int(getattr(event, "screen_x", 0))
+            self.body_resize_origin_percent = self.body_plan_width_percent
+            handle.capture_mouse()
+            handle.add_class("-dragging")
+            stop = getattr(event, "stop", None)
+            if callable(stop):
+                stop()
+
+        def on_mouse_move(self, event) -> None:
+            if not self.body_resize_dragging:
+                return
+
+            body_row = self.query_one("#body_row", Horizontal)
+            handle = self.query_one("#body_resize_handle", Static)
+            available_width = max(1, body_row.size.width - handle.size.width - 2)
+            delta_x = int(getattr(event, "screen_x", 0)) - self.body_resize_origin_screen_x
+            updated_percent = self.body_resize_origin_percent + (delta_x / available_width) * 100
+            self._apply_body_split(updated_percent)
+
+            stop = getattr(event, "stop", None)
+            if callable(stop):
+                stop()
+
+        def on_mouse_up(self, event) -> None:
+            if not self.body_resize_dragging:
+                return
+
+            self.body_resize_dragging = False
+            handle = self.query_one("#body_resize_handle", Static)
+            handle.release_mouse()
+            handle.remove_class("-dragging")
+            stop = getattr(event, "stop", None)
+            if callable(stop):
+                stop()
+
+        def action_resize_split_left(self) -> None:
+            self._apply_body_split(
+                nudge_body_split(
+                    self.body_plan_width_percent,
+                    -BODY_RESIZE_KEY_STEP_PERCENT,
+                )
+            )
+
+        def action_resize_split_right(self) -> None:
+            self._apply_body_split(
+                nudge_body_split(
+                    self.body_plan_width_percent,
+                    BODY_RESIZE_KEY_STEP_PERCENT,
+                )
+            )
+
+        def _write_raw_commentary_log(self, text: str) -> None:
+            path = self.raw_commentary_log_path
+            if path is None:
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(format_commentary_log_entry(text))
 
         def _update_plan_markdown(self, force: bool = False) -> None:
             markdown = self.query_one("#plan_markdown", Markdown)
@@ -844,6 +1071,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             report = self.query_one("#report", RichLog)
             report.write(
                 "\nKeyboard shortcuts:\n"
+                "- left/right: resize commentary vs. plan\n"
                 "- a: timeline all\n"
                 "- e: timeline errors\n"
                 "- p: timeline progress\n"
@@ -852,6 +1080,7 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                 "- u: timeline approvals\n"
                 "- g: timeline git\n"
                 "- b: back in plan markdown view\n"
+                "- drag the center divider to resize the plan and commentary panes\n"
                 "- f: cycle timeline filters\n"
                 "- q: quit"
             )
@@ -1147,7 +1376,9 @@ def run_textual_tui(cfg: AgentConfig) -> int:
             checks = self.query_one("#checks", DataTable)
             report = self.query_one("#report", RichLog)
             raw_log = self.query_one("#raw_log", RichLog)
-            commentary = self.query_one("#commentary", RichLog)
+            raw_commentary = self.query_one("#raw_commentary", RichLog)
+            marvin_commentary = self.query_one("#marvin_commentary", RichLog)
+            context_commentary = self.query_one("#context_commentary", RichLog)
             token_report = self.query_one("#token_report", Static)
 
             while not self.event_queue.empty():
@@ -1201,9 +1432,11 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                     focus_summary = " | ".join(bit for bit in focus_bits if bit and bit != "-")
                     self.current_step = focus_summary or snapshot.detail or self.current_step
                     normalized_detail = normalize_progress_detail(snapshot.detail)
+                    normalized_feedback = normalize_progress_detail(snapshot.agent_feedback)
                     progress_key = (
                         snapshot.stage,
                         normalized_detail,
+                        normalized_feedback,
                         snapshot.completed_repos,
                         snapshot.total_repos,
                         snapshot.failed_repos,
@@ -1245,22 +1478,27 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                         self.last_timeline_seen_at[progress_key] = now_ts
                     self.last_timeline_progress_key = progress_key
                     cycle = self.commentary_cycle_index.get(snapshot.stage, 0)
-                    commentary_text = marvin_commentary_from_progress(snapshot, cycle)
-                    key = (snapshot.stage, normalized_detail)
+                    key = (snapshot.stage, normalized_detail, normalized_feedback)
                     commentary_allowed = (
                         key != self.last_commentary_key
                         or now_ts - self.last_commentary_seen_at.get(key, 0.0)
                         >= PROGRESS_REPEAT_COOLDOWN_SEC
                     )
                     if commentary_allowed:
-                        commentary.write(commentary_text)
+                        commentary_tabs = build_commentary_tabs(snapshot, cycle)
+                        raw_commentary.write(commentary_tabs["raw"])
+                        self._write_raw_commentary_log(commentary_tabs["raw"])
+                        marvin_commentary.write(commentary_tabs["marvin"])
+                        if commentary_tabs["context"]:
+                            context_commentary.write(commentary_tabs["context"])
                         self.last_commentary_key = key
                         self.last_commentary_seen_at[key] = now_ts
                         self.commentary_cycle_index[snapshot.stage] = cycle + 1
-                        try:
-                            commentary.scroll_end(animate=False)
-                        except Exception:
-                            pass
+                        for log in (raw_commentary, marvin_commentary, context_commentary):
+                            try:
+                                log.scroll_end(animate=False)
+                            except Exception:
+                                pass
                     token_report.update(self._token_report_text())
                 elif kind == "check_status":
                     checks.clear()

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import io
+import json
 import math
 import re
 import subprocess
+from collections.abc import Callable
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
@@ -261,20 +263,267 @@ def extract_agent_status_message(
     return fallback
 
 
-def invoke_agent(agent: Any, prompt: str, verbose_io: bool) -> InvocationCapture:
+def _message_content_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+
+    content = getattr(value, "content", None)
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("content") or item.get("output")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+            else:
+                text = getattr(item, "text", None) or getattr(item, "content", None)
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _is_human_message_like(value: Any) -> bool:
+    value_type = str(getattr(value, "type", "") or "").lower()
+    class_name = value.__class__.__name__.lower()
+    return value_type == "human" or "human" in class_name
+
+
+def _coerce_json_text(value: str) -> Any:
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "[{":
+        return None
+    try:
+        return json.loads(stripped)
+    except Exception:
+        return None
+
+
+def _structured_feedback_lines(value: Any) -> list[str]:
+    if _is_human_message_like(value):
+        return []
+
+    message_text = _message_content_text(value)
+    if message_text:
+        parsed = _coerce_json_text(message_text)
+        if parsed is not None:
+            return _structured_feedback_lines(parsed)
+        cleaned = re.sub(r"\s+", " ", message_text).strip()
+        return [cleaned] if cleaned else []
+
+    if isinstance(value, str):
+        parsed = _coerce_json_text(value)
+        if parsed is not None:
+            return _structured_feedback_lines(parsed)
+        cleaned = re.sub(r"\s+", " ", value).strip()
+        return [cleaned] if cleaned else []
+
+    if isinstance(value, list):
+        collected: list[str] = []
+        productive_items = 0
+        for item in value:
+            if len(collected) >= 3:
+                break
+            item_lines = _structured_feedback_lines(item)
+            if item_lines:
+                productive_items += 1
+            for line in item_lines:
+                if line and line not in collected:
+                    collected.append(line)
+                if len(collected) >= 3:
+                    break
+        if productive_items > len(collected) and collected:
+            collected.append(f"and {productive_items - len(collected)} more")
+        return collected
+
+    if isinstance(value, dict):
+        collected: list[str] = []
+        name = re.sub(r"\s+", " ", str(value.get("name") or "")).strip()
+        description = re.sub(r"\s+", " ", str(value.get("description") or "")).strip()
+        index_value = value.get("index", value.get("step_index", value.get("number")))
+
+        if name and description:
+            prefix = ""
+            if isinstance(index_value, int):
+                prefix = f"Step {index_value + 1}: "
+            collected.append(f"{prefix}{name}: {description}")
+        elif name:
+            prefix = ""
+            if isinstance(index_value, int):
+                prefix = f"Step {index_value + 1}: "
+            collected.append(prefix + name)
+        elif description:
+            collected.append(description)
+
+        primary_keys = (
+            "description",
+            "summary",
+            "message",
+            "status",
+            "update",
+            "thought",
+            "reasoning",
+            "assistant",
+            "response",
+            "content",
+            "text",
+        )
+        for key in primary_keys:
+            if key not in value:
+                continue
+            for line in _structured_feedback_lines(value.get(key)):
+                if line and line not in collected:
+                    collected.append(line)
+
+        step_like = value.get("step")
+        if step_like is not None:
+            for line in _structured_feedback_lines(step_like):
+                if line and line not in collected:
+                    collected.append(line)
+
+        steps = value.get("steps")
+        if isinstance(steps, list) and steps:
+            step_lines = _structured_feedback_lines(steps)
+            if step_lines:
+                prefix = "Planned steps: " if not collected else "Next steps: "
+                collected.append(prefix + "; ".join(step_lines))
+
+        if collected:
+            return collected
+
+        fallback_bits: list[str] = []
+        for item in value.values():
+            fallback_bits.extend(_structured_feedback_lines(item))
+            if len(fallback_bits) >= 3:
+                break
+        return fallback_bits
+
+    return []
+
+
+def extract_structured_feedback_text(value: Any) -> str:
+    lines = _structured_feedback_lines(value)
+    if not lines:
+        return ""
+    return " ".join(line.strip() for line in lines if line).strip()
+
+
+def extract_response_content(response: Any) -> str:
+    if isinstance(response, dict):
+        messages = response.get("messages") or []
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                if _is_human_message_like(message):
+                    continue
+                text = _message_content_text(message)
+                if text:
+                    return text
+
+        for key in ("assistant", "completion", "response", "output", "message", "content", "text"):
+            value = response.get(key)
+            text = _message_content_text(value) if not isinstance(value, str) else value.strip()
+            if text:
+                return text
+
+        for value in response.values():
+            text = extract_response_content(value)
+            if text:
+                return text
+        return str(response)
+
+    if isinstance(response, list):
+        for item in reversed(response):
+            text = extract_response_content(item)
+            if text:
+                return text
+        return ""
+
+    text = _message_content_text(response)
+    if text:
+        return text
+
+    if hasattr(response, "content"):
+        return _message_content_text(response)
+    return str(response)
+
+
+def extract_stream_chunk_message(
+    chunk: Any,
+    fallback: str = "",
+    *,
+    max_chars: int | None = 220,
+) -> str:
+    text = extract_response_content(chunk)
+    preferred_text = ""
+    structured_text = extract_structured_feedback_text(chunk)
+    if not text or text == str(chunk):
+        if isinstance(chunk, dict):
+            preferred_keys = (
+                "status",
+                "update",
+                "thought",
+                "reasoning",
+                "assistant",
+                "response",
+                "message",
+                "content",
+                "text",
+            )
+            for key in preferred_keys:
+                if key not in chunk:
+                    continue
+                value = chunk.get(key)
+                candidate = extract_response_content(value)
+                if candidate and candidate != str(value):
+                    preferred_text = candidate
+                    break
+    final_text = structured_text or preferred_text or ("" if text == str(chunk) else text)
+    if not final_text:
+        return fallback
+    if max_chars is None:
+        return re.sub(r"\s+", " ", final_text).strip() or fallback
+    return extract_brief_model_message(final_text, fallback, max_chars=max_chars)
+
+
+def invoke_agent(
+    agent: Any,
+    prompt: str,
+    verbose_io: bool,
+    *,
+    feedback_callback: Callable[[str], None] | None = None,
+) -> InvocationCapture:
     stdout_buffer = io.StringIO()
     stderr_buffer = io.StringIO()
     out_ctx = nullcontext() if verbose_io else redirect_stdout(stdout_buffer)
     err_ctx = nullcontext() if verbose_io else redirect_stderr(stderr_buffer)
     with out_ctx, err_ctx:
-        response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
+        if hasattr(agent, "stream"):
+            last_chunk: Any | None = None
+            last_contentful_chunk: Any | None = None
+            last_feedback = ""
+            for chunk in agent.stream({"messages": [HumanMessage(content=prompt)]}):
+                last_chunk = chunk
+                chunk_content = extract_response_content(chunk)
+                if chunk_content and chunk_content != str(chunk):
+                    last_contentful_chunk = chunk
+                if feedback_callback is None:
+                    continue
+                feedback = extract_stream_chunk_message(chunk, fallback="", max_chars=None)
+                if feedback and feedback != last_feedback:
+                    last_feedback = feedback
+                    feedback_callback(feedback)
+            if last_chunk is None:
+                response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
+            else:
+                response = last_contentful_chunk or last_chunk
+        else:
+            response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
 
-    if isinstance(response, dict):
-        messages = response.get("messages") or []
-        last = messages[-1] if messages else response
-        content = getattr(last, "content", None) or str(last)
-    else:
-        content = getattr(response, "content", None) or str(response)
+    content = extract_response_content(response)
 
     return InvocationCapture(
         content=content,

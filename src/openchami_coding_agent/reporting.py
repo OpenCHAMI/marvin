@@ -141,6 +141,8 @@ def render_run_progress(
     *,
     stage: str,
     detail: str,
+    base_detail: str | None = None,
+    agent_feedback: str | None = None,
     planning_mode: str = "single",
     current_main_step: int | None = None,
     current_main_total: int = 0,
@@ -158,6 +160,8 @@ def render_run_progress(
     snapshot = ProgressSnapshot(
         stage=stage,
         detail=detail,
+        base_detail=base_detail or detail,
+        agent_feedback=agent_feedback or "",
         workspace=_WORKSPACE_NAME,
         planning_mode=planning_mode,
         current_main_step=current_main_step,
@@ -225,18 +229,27 @@ def progress_heartbeat(
             "total_tokens": int(token_data.get("total_tokens", 0) or 0),
         }
 
-    def _emit() -> None:
-        current_detail = detail
+    def _emit(
+        *,
+        detail_override: str | None = None,
+        agent_feedback_override: str | None = None,
+    ) -> None:
+        current_detail = detail_override or detail
+        agent_feedback = agent_feedback_override or ""
         if detail_provider is not None:
             try:
                 provided = detail_provider().strip()
-                if provided:
+                if provided and detail_override is None:
                     current_detail = provided
+                    if provided != detail:
+                        agent_feedback = provided
             except Exception:
-                current_detail = detail
+                current_detail = detail_override or detail
         render_run_progress(
             stage=stage,
             detail=current_detail,
+            base_detail=detail,
+            agent_feedback=agent_feedback,
             planning_mode=planning_mode,
             current_main_step=current_main_step,
             current_main_total=current_main_total,
@@ -256,11 +269,21 @@ def progress_heartbeat(
         while not stopped.wait(interval_sec):
             _emit()
 
+    def emit_update(
+        detail_override: str | None = None,
+        *,
+        agent_feedback_override: str | None = None,
+    ) -> None:
+        _emit(
+            detail_override=detail_override,
+            agent_feedback_override=agent_feedback_override,
+        )
+
     _emit()
     thread = threading.Thread(target=_loop, daemon=True)
     thread.start()
     try:
-        yield
+        yield emit_update
     finally:
         stopped.set()
         thread.join(timeout=0.5)
