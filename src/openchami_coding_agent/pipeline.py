@@ -50,6 +50,7 @@ from .utils import (
     extract_agent_status_message,
     extract_agent_tokens,
     extract_brief_model_message,
+    format_runtime_environment_summary,
     format_cache_hit_ratio,
     invoke_agent,
     progress_file,
@@ -180,6 +181,7 @@ def run_pipeline(cfg: AgentConfig) -> int:
     set_workspace_name(workspace.name)
 
     os.chdir(workspace)
+    emit_panel(format_runtime_environment_summary(), border_style="blue")
     emit_panel(
         f"Workspace containment engaged. Working directory pinned to: {workspace}",
         border_style="blue",

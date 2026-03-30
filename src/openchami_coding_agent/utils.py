@@ -5,10 +5,13 @@ from __future__ import annotations
 import io
 import json
 import math
+import platform
 import re
 import subprocess
+import sys
 from collections.abc import Callable
 from contextlib import nullcontext, redirect_stderr, redirect_stdout
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -248,6 +251,35 @@ def format_token_counts(token_usage: dict[str, int]) -> str:
         ]
     )
     return " | ".join(parts)
+
+
+def _installed_version(*distribution_names: str) -> str:
+    for distribution_name in distribution_names:
+        try:
+            return metadata.version(distribution_name)
+        except metadata.PackageNotFoundError:
+            continue
+    return "unknown"
+
+
+def format_runtime_environment_summary() -> str:
+    marvin_version = _installed_version("openchami-coding-agent")
+    ursa_version = _installed_version("ursa-ai", "ursa")
+    python_label = f"{platform.python_implementation()} {platform.python_version()}"
+    platform_label = f"{platform.system()} {platform.release()}"
+    machine = platform.machine() or "unknown"
+
+    return "\n".join(
+        [
+            "Runtime environment",
+            f"Marvin: {marvin_version}",
+            f"Python: {python_label}",
+            f"URSA: {ursa_version}",
+            f"Platform: {platform_label}",
+            f"Arch: {machine}",
+            f"Executable: {sys.executable}",
+        ]
+    )
 
 
 def build_token_cache_summary(token_usage: dict[str, int]) -> dict[str, int | float]:

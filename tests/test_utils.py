@@ -8,6 +8,7 @@ from openchami_coding_agent.utils import (
     extract_narrative_model_message,
     extract_stream_chunk_message,
     extract_structured_feedback_text,
+    format_runtime_environment_summary,
     format_cache_hit_ratio,
     format_compact_count,
     format_elapsed_runtime,
@@ -95,6 +96,55 @@ def test_format_token_counts_includes_cached_when_present() -> None:
             "total_tokens": 1_233_000,
         }
     ) == "sent=12.3K | cached=10K | received=502K | total=1.2M"
+
+
+def test_format_runtime_environment_summary_renders_detected_versions(monkeypatch) -> None:
+    versions = {
+        "openchami-coding-agent": "0.1.0",
+        "ursa-ai": "0.15.6",
+    }
+
+    monkeypatch.setattr(
+        "openchami_coding_agent.utils.metadata.version",
+        lambda name: versions[name],
+    )
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.python_implementation", lambda: "CPython")
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.python_version", lambda: "3.12.13")
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.release", lambda: "24.5.0")
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("openchami_coding_agent.utils.sys", type("FakeSys", (), {"executable": "/venv/bin/python"})())
+
+    assert format_runtime_environment_summary() == "\n".join(
+        [
+            "Runtime environment",
+            "Marvin: 0.1.0",
+            "Python: CPython 3.12.13",
+            "URSA: 0.15.6",
+            "Platform: Darwin 24.5.0",
+            "Arch: arm64",
+            "Executable: /venv/bin/python",
+        ]
+    )
+
+
+def test_format_runtime_environment_summary_falls_back_when_package_metadata_missing(monkeypatch) -> None:
+    def fake_version(name: str) -> str:
+        raise __import__("importlib").metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr("openchami_coding_agent.utils.metadata.version", fake_version)
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.python_implementation", lambda: "CPython")
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.python_version", lambda: "3.12.13")
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.system", lambda: "Linux")
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.release", lambda: "6.10")
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr("openchami_coding_agent.utils.sys", type("FakeSys", (), {"executable": "/usr/bin/python3"})())
+
+    summary = format_runtime_environment_summary()
+
+    assert "Marvin: unknown" in summary
+    assert "URSA: unknown" in summary
+    assert "Python: CPython 3.12.13" in summary
 
 
 def test_extract_agent_tokens_reads_cached_prompt_tokens_details() -> None:

@@ -35,11 +35,27 @@ It gives you:
 
 ## Installation
 
-Install the package in editable mode for local development:
+Marvin requires Python 3.12 or newer.
+
+Install development dependencies with `uv`:
 
 ```bash
-pip install -e .[dev]
+uv sync --frozen --extra dev
 ```
+
+Run Marvin and project tooling through `uv run` so commands execute inside the managed environment instead of whichever interpreter happens to be nearby.
+
+Run Marvin in Docker with your local workspace bind-mounted into the container:
+
+```bash
+docker build -t marvin .
+docker run --rm -it \
+	-e OPENAI_API_KEY="$OPENAI_API_KEY" \
+	-v "$(pwd):/workspace" \
+	marvin tokensmith-amsc-task.yaml
+```
+
+The image now follows URSA's `uv`-based container style more closely and installs Marvin from the locked project metadata in `pyproject.toml` and `uv.lock`. Native build dependencies are kept in a separate builder stage and only the working runtime environment is shipped. The container runs from `/workspace`, so the mounted directory is where Marvin reads configs and creates or reuses workspaces. If your repository checks need extra toolchains such as `go`, extend the image rather than pretending Python can solve that.
 
 If you are using OpenAI-backed models, set `OPENAI_API_KEY` before running Marvin. It will not infer your credentials by sheer bitterness.
 
@@ -48,31 +64,31 @@ If you are using OpenAI-backed models, set `OPENAI_API_KEY` before running Marvi
 Generate a config interactively:
 
 ```bash
-marvin init
+uv run marvin init
 ```
 
 Generate a config non-interactively from a source document:
 
 ```bash
-python3 marvin.py init --source-file tokensmith-amsc.md --output tokensmith-amsc-task.yaml
+uv run marvin init --source-file tokensmith-amsc.md --output tokensmith-amsc-task.yaml
 ```
 
 Run Marvin with that config:
 
 ```bash
-marvin tokensmith-amsc-task.yaml
+uv run marvin tokensmith-amsc-task.yaml
 ```
 
 Run with the TUI dashboard:
 
 ```bash
-marvin tokensmith-amsc-task.yaml --tui
+uv run marvin tokensmith-amsc-task.yaml --tui
 ```
 
 Resume an existing workspace from a checkpoint:
 
 ```bash
-marvin tokensmith-amsc-task.yaml --workspace ./tokensmith-run --resume --resume-from executor_checkpoint_5.db
+uv run marvin tokensmith-amsc-task.yaml --workspace ./tokensmith-run --resume --resume-from executor_checkpoint_5.db
 ```
 
 ## Core Concepts
@@ -109,7 +125,7 @@ Marvin writes and updates these artifacts in the workspace:
 Basic run:
 
 ```bash
-marvin path/to/task.yaml
+uv run marvin path/to/task.yaml
 ```
 
 Useful run flags:
@@ -137,13 +153,13 @@ The default run path is non-interactive once execution begins. That was intentio
 Interactive mode:
 
 ```bash
-marvin init --interactive
+uv run marvin init --interactive
 ```
 
 Non-interactive draft generation:
 
 ```bash
-marvin init --source-file path/to/notes.md --output task.yaml
+uv run marvin init --source-file path/to/notes.md --output task.yaml
 ```
 
 Useful init flags:
@@ -297,21 +313,21 @@ The TUI is deliberately more informative now. It still sounds like Marvin, becau
 Install development dependencies:
 
 ```bash
-pip install -e .[dev]
+uv sync --frozen --extra dev
 ```
 
 Run the local checks:
 
 ```bash
-ruff check .
-mypy
-pytest
+uv run ruff check .
+uv run mypy
+uv run pytest
 ```
 
 ## CI
 
 Pull requests run:
 
-- `ruff check .`
-- `mypy`
-- `pytest`
+- `uv run ruff check .`
+- `uv run mypy`
+- `uv run pytest`

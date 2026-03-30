@@ -2,11 +2,11 @@
 
 ## Development setup
 
-1. Create and activate a virtual environment.
-2. Install dependencies:
+1. Install `uv` if it is not already available.
+2. Sync the locked development environment:
 
 ```bash
-pip install -e .[dev]
+uv sync --frozen --extra dev
 ```
 
 ## Local checks
@@ -14,9 +14,9 @@ pip install -e .[dev]
 Run before opening a PR:
 
 ```bash
-ruff check .
-mypy
-pytest
+uv run ruff check .
+uv run mypy
+uv run pytest
 ```
 
 ## Pull requests

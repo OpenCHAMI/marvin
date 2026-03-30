@@ -29,6 +29,7 @@ from .utils import (
     format_cache_hit_ratio,
     format_compact_count,
     format_elapsed_runtime,
+    format_runtime_environment_summary,
     token_delta,
 )
 
@@ -438,7 +439,10 @@ def run_textual_tui(cfg: AgentConfig) -> int:
         textual_screen = importlib.import_module("textual.screen")
         textual_widgets = importlib.import_module("textual.widgets")
     except Exception as exc:
-        raise RuntimeError("Textual is not available. Install with: pip install textual") from exc
+        raise RuntimeError(
+            "Textual is not available. Sync project dependencies with: "
+            "uv sync --frozen --extra dev"
+        ) from exc
 
     AppBase = textual_app.App
     Container = textual_containers.Container
@@ -852,13 +856,18 @@ def run_textual_tui(cfg: AgentConfig) -> int:
                 "- Shortcuts: left/right resize panes, a/e/p/k/d/u/g filters, "
                 "f cycle filter, ? help, q quit"
             )
+            runtime_summary = format_runtime_environment_summary()
+            report.write("\nRuntime environment:\n" + runtime_summary)
+            raw_commentary.write(runtime_summary)
+            self._write_raw_commentary_log(runtime_summary)
             raw_commentary.write("Waiting for direct agent commentary.")
             self._write_raw_commentary_log("Waiting for direct agent commentary.")
             marvin_commentary.write(
                 "Commentary online. I will provide the emotional damage when progress arrives."
             )
             context_commentary.write(
-                "Run context will accumulate here once the pipeline starts moving."
+                runtime_summary
+                + "\n\nRun context will accumulate here once the pipeline starts moving."
             )
             token_report.update(self._token_report_text())
             self._apply_body_split(self.body_plan_width_percent)
