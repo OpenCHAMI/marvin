@@ -26,6 +26,7 @@ class RepoSpec:
     checkout: bool = False
     language: str = "generic"
     description: str = ""
+    brief: str = ""
     checks: list[str] = field(default_factory=list)
 
 

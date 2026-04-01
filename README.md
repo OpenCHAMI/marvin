@@ -283,8 +283,30 @@ Field behavior:
 - `agent.planner_prompt_appendix` affects only the planner.
 - `agent.executor_prompt_appendix` affects only execution.
 - `agent.repair_prompt_appendix` affects only repair passes.
+- `agent.*_path` variants load appendix text from files relative to the YAML config.
+- `repos[].brief` adds cached repository context to planner, executor, and repair prompts.
+- `repos[].brief_path` loads that brief from a file relative to the YAML config.
 - `execution.executor_agent` selects the URSA execution agent implementation.
 - `execution.commit_each_step` controls whether Marvin tries to create a git commit after each completed step.
+
+Example:
+
+```yaml
+agent:
+	prompt_appendix_path: prompt-library/appendices/openchami-shared.md
+	executor_prompt_appendix_path: prompt-library/appendices/fabrica-executor.md
+
+repos:
+	- name: fabrica
+		url: https://github.com/OpenCHAMI/fabrica.git
+		branch: main
+		checkout: true
+		language: generic
+		description: Fabrica Go API code generation repository
+		brief_path: prompt-library/briefs/fabrica.md
+```
+
+Use briefs for high-signal invariants, integration touchpoints, and change triggers. They work best as short, opinionated cache files, not mini-READMEs.
 
 ## Textual TUI
 

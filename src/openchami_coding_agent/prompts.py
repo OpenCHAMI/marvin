@@ -80,6 +80,12 @@ def build_repo_fix_prompt_prefix(
 ) -> str:
     workspace = str(cfg.workspace) if cfg.workspace else "<workspace-not-set>"
     workdir = str(default_working_directory(cfg) or workspace)
+    repo_description = (
+        f"- description: {_clip_text(repo.description, 220)}\n"
+        if repo.description
+        else ""
+    )
+    repo_brief = f"- brief: {_clip_text(repo.brief, 500)}\n" if repo.brief else ""
     prompt = f"""
 You are {cfg.agent_name}, repairing a repository that failed validation during OpenCHAMI execution.
 
@@ -95,6 +101,7 @@ Default shell working directory:
 Repository:
 - name: {repo.name}
 - path: {repo.path}
+{repo_description}{repo_brief}
 
 Plan digest:
 {_plan_digest(plan_markdown, structured_plan)}
@@ -276,6 +283,9 @@ Workspace root (hard containment):
 Default shell working directory:
 {workdir}
 
+Available repositories:
+{repo_listing(cfg.repos)}
+
 Execution constraints:
 - Preserve backward compatibility where practical.
 
@@ -411,6 +421,9 @@ Workspace root (hard containment):
 
 Default shell working directory:
 {workdir}
+
+Available repositories:
+{repo_listing(cfg.repos)}
 
 Overall project:
 - project: {cfg.project}

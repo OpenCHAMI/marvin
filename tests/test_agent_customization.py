@@ -59,7 +59,12 @@ def test_agent_config_from_raw_falls_back_for_blank_agent_fields(tmp_path: Path)
 
 
 def test_prompt_builders_include_shared_and_specific_agent_customization(tmp_path: Path) -> None:
-    repo = RepoSpec(name="svc", path=tmp_path / "repos" / "svc")
+    repo = RepoSpec(
+        name="svc",
+        path=tmp_path / "repos" / "svc",
+        description="Service repository",
+        brief="Inspect handlers, config loaders, and generated artifacts before editing.",
+    )
     cfg = AgentConfig(
         project="OpenCHAMI",
         problem="Test custom prompts",
@@ -106,6 +111,7 @@ def test_prompt_builders_include_shared_and_specific_agent_customization(tmp_pat
     assert "Stay calm and pragmatic." in planner_prompt
     assert "Shared agent instructions:\nShared guidance." in planner_prompt
     assert "Planner-specific agent instructions:\nPlanner guidance." in planner_prompt
+    assert "brief=Inspect handlers, config loaders" in planner_prompt
     assert "Structured step schema requirements:" in planner_prompt
     assert "expected_outputs" in planner_prompt
     assert "success_criteria" in planner_prompt
@@ -115,6 +121,8 @@ def test_prompt_builders_include_shared_and_specific_agent_customization(tmp_pat
     assert "You are Ford." in executor_prompt
     assert "Shared agent instructions:\nShared guidance." in executor_prompt
     assert "Executor-specific agent instructions:\nExecutor guidance." in executor_prompt
+    assert "Available repositories:" in executor_prompt
+    assert "brief=Inspect handlers, config loaders" in executor_prompt
     assert "Plan digest:" in executor_prompt
     assert "+2 additional step(s) omitted from this prompt for brevity." in executor_prompt
     assert "Plan to execute:" not in executor_prompt
@@ -123,11 +131,13 @@ def test_prompt_builders_include_shared_and_specific_agent_customization(tmp_pat
     assert "You are Ford, repairing" in repair_prompt
     assert "Shared agent instructions:\nShared guidance." in repair_prompt
     assert "Repair-specific agent instructions:\nRepair guidance." in repair_prompt
+    assert "brief: Inspect handlers, config loaders" in repair_prompt
     assert "Plan digest:" in repair_prompt
     assert "Validation failure details:" in repair_prompt
     assert "Preserve useful existing comments." in repair_prompt
     assert len(repair_prompt) < 6000
 
     assert "Overall project:" in subplanner_prompt
+    assert "Available repositories:" in subplanner_prompt
     assert "comments must stay accurate and relevant" in subplanner_prompt
     assert len(subplanner_prompt) < 2500

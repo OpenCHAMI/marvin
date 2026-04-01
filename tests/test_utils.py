@@ -8,10 +8,10 @@ from openchami_coding_agent.utils import (
     extract_narrative_model_message,
     extract_stream_chunk_message,
     extract_structured_feedback_text,
-    format_runtime_environment_summary,
     format_cache_hit_ratio,
     format_compact_count,
     format_elapsed_runtime,
+    format_runtime_environment_summary,
     format_token_counts,
     invoke_agent,
     merge_tokens,
@@ -133,12 +133,14 @@ def test_format_runtime_environment_summary_falls_back_when_package_metadata_mis
         raise __import__("importlib").metadata.PackageNotFoundError(name)
 
     monkeypatch.setattr("openchami_coding_agent.utils.metadata.version", fake_version)
-    monkeypatch.setattr("openchami_coding_agent.utils.platform.python_implementation", lambda: "CPython")
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.python_implementation",
+                         lambda: "CPython")
     monkeypatch.setattr("openchami_coding_agent.utils.platform.python_version", lambda: "3.12.13")
     monkeypatch.setattr("openchami_coding_agent.utils.platform.system", lambda: "Linux")
     monkeypatch.setattr("openchami_coding_agent.utils.platform.release", lambda: "6.10")
     monkeypatch.setattr("openchami_coding_agent.utils.platform.machine", lambda: "x86_64")
-    monkeypatch.setattr("openchami_coding_agent.utils.sys", type("FakeSys", (), {"executable": "/usr/bin/python3"})())
+    monkeypatch.setattr("openchami_coding_agent.utils.sys",  
+                        type("FakeSys", (), {"executable": "/usr/bin/python3"})())
 
     summary = format_runtime_environment_summary()
 

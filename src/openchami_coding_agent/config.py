@@ -20,6 +20,78 @@ from .ursa_compat import (
 )
 from .utils import run_command, slugify, to_plain_data
 
+_AGENT_APPENDIX_PATH_FIELDS = {
+    "prompt_appendix": "prompt_appendix_path",
+    "planner_prompt_appendix": "planner_prompt_appendix_path",
+    "executor_prompt_appendix": "executor_prompt_appendix_path",
+    "repair_prompt_appendix": "repair_prompt_appendix_path",
+}
+
+
+def _compact_text(text: str, max_chars: int) -> str:
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 3].rstrip() + "..."
+
+
+def _merge_text_blocks(*parts: object) -> str:
+    blocks = [str(part).strip() for part in parts if isinstance(part, str) and part.strip()]
+    return "\n\n".join(blocks)
+
+
+def _resolve_support_file_path(config_dir: Path, raw_path: object, *, label: str) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    path = Path(raw_path.strip())
+    if not path.is_absolute():
+        path = (config_dir / path).resolve()
+    else:
+        path = path.resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"{label} file not found: {path}")
+    if not path.is_file():
+        raise ValueError(f"{label} path is not a file: {path}")
+    return path
+
+
+def _load_support_text(config_dir: Path, raw_path: object, *, label: str) -> str:
+    path = _resolve_support_file_path(config_dir, raw_path, label=label)
+    if path is None:
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def hydrate_config_support_files(raw: dict[str, Any], *, config_dir: Path) -> dict[str, Any]:
+    hydrated = dict(raw)
+
+    agent = dict(hydrated.get("agent", {}) or {})
+    for inline_key, path_key in _AGENT_APPENDIX_PATH_FIELDS.items():
+        agent[inline_key] = _merge_text_blocks(
+            agent.get(inline_key),
+            _load_support_text(config_dir, agent.get(path_key), label=f"agent.{path_key}"),
+        )
+    if agent:
+        hydrated["agent"] = agent
+
+    repos: list[dict[str, Any]] = []
+    for raw_repo in hydrated.get("repos", []) or []:
+        repo = dict(raw_repo)
+        brief_label = f"repo {repo.get('name', '<unknown>')} brief_path"
+        repo["brief"] = _merge_text_blocks(
+            repo.get("brief"),
+            _load_support_text(
+                config_dir,
+                repo.get("brief_path"),
+                label=brief_label,
+            ),
+        )
+        repos.append(repo)
+    if repos:
+        hydrated["repos"] = repos
+
+    return hydrated
+
 
 def resolve_workspace(
     raw: dict[str, Any],
@@ -107,6 +179,7 @@ def resolve_repo(workspace: Path, raw_repo: dict[str, Any]) -> RepoSpec:
         checkout=bool(raw_repo.get("checkout", False)),
         language=raw_repo.get("language", "generic"),
         description=raw_repo.get("description", ""),
+        brief=raw_repo.get("brief", ""),
         checks=list(raw_repo.get("checks") or []),
     )
 
@@ -115,6 +188,7 @@ def parse_config(
     config_path: Path, cli_workspace: str | None = None, resume: bool = False
 ) -> AgentConfig:
     raw = to_plain_data(load_yaml_config(str(config_path)))
+    raw = hydrate_config_support_files(raw, config_dir=config_path.resolve().parent)
     workspace, workspace_reused = resolve_workspace(raw, cli_workspace=cli_workspace, resume=resume)
     setup_workspace(str(workspace), project=str(raw.get("project") or "run"))
 
@@ -201,7 +275,9 @@ def repo_listing(repos: list[RepoSpec]) -> str:
         if repo.language:
             bits.append(f"language={repo.language}")
         if repo.description:
-            bits.append(repo.description)
+            bits.append(_compact_text(repo.description, 180))
+        if repo.brief:
+            bits.append(f"brief={_compact_text(repo.brief, 420)}")
         lines.append(" | ".join(bits))
     return "\n".join(lines)
 
