@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
@@ -44,15 +45,49 @@ def _resolve_support_file_path(config_dir: Path, raw_path: object, *, label: str
     if not isinstance(raw_path, str) or not raw_path.strip():
         return None
     path = Path(raw_path.strip())
-    if not path.is_absolute():
-        path = (config_dir / path).resolve()
+    attempted_paths: list[Path] = []
+    if path.is_absolute():
+        resolved = path.resolve()
+        attempted_paths.append(resolved)
+        if not resolved.exists():
+            raise FileNotFoundError(f"{label} file not found: {resolved}")
+        if not resolved.is_file():
+            raise ValueError(f"{label} path is not a file: {resolved}")
+        return resolved
+
+    resolved = (config_dir / path).resolve()
+    attempted_paths.append(resolved)
+    if resolved.exists():
+        if not resolved.is_file():
+            raise ValueError(f"{label} path is not a file: {resolved}")
+        return resolved
+
+    builtin = _resolve_builtin_support_file(path)
+    if builtin is not None:
+        return builtin
+
+    attempted = ", ".join(str(candidate) for candidate in attempted_paths)
+    raise FileNotFoundError(f"{label} file not found: {attempted}")
+
+
+def _resolve_builtin_support_file(path: Path) -> Path | None:
+    parts = path.parts
+    if not parts:
+        return None
+    if parts[0] == "prompt-library":
+        resource_parts = ("prompt_library", *parts[1:])
+    elif parts[0] == "prompt_library":
+        resource_parts = parts
     else:
-        path = path.resolve()
-    if not path.exists():
-        raise FileNotFoundError(f"{label} file not found: {path}")
-    if not path.is_file():
-        raise ValueError(f"{label} path is not a file: {path}")
-    return path
+        return None
+
+    try:
+        candidate = resources.files("openchami_coding_agent").joinpath(*resource_parts)
+    except ModuleNotFoundError:
+        return None
+    if not candidate.is_file():
+        return None
+    return Path(candidate)
 
 
 def _load_support_text(config_dir: Path, raw_path: object, *, label: str) -> str:

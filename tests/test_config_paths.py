@@ -125,3 +125,28 @@ repos: []
 
     with pytest.raises(FileNotFoundError, match="agent.prompt_appendix_path"):
         parse_config(config_path)
+
+
+def test_parse_config_falls_back_to_packaged_prompt_library(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config_path = tmp_path / "task.yaml"
+    config_path.write_text(
+        """
+project: OpenCHAMI
+problem: Use packaged Marvin prompt assets.
+workspace: workspace
+agent:
+  prompt_appendix_path: prompt-library/appendices/openchami-shared.md
+repos:
+  - name: fabrica
+    brief_path: prompt-library/briefs/fabrica.md
+""".strip(),
+        encoding="utf-8",
+    )
+
+    cfg = parse_config(config_path)
+
+    assert "Repository-first OpenCHAMI guidance:" in cfg.prompt_appendix
+    assert cfg.repos[0].brief.startswith("repo: fabrica")

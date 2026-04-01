@@ -37,6 +37,12 @@ marvin = "openchami_coding_agent.cli:main"
 where = ["src"]
 include = ["openchami_coding_agent*"]
 
+[tool.setuptools.package-data]
+openchami_coding_agent = [
+  "prompt_library/appendices/*.md",
+  "prompt_library/briefs/*.md",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
