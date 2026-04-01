@@ -108,12 +108,14 @@ def test_format_runtime_environment_summary_renders_detected_versions(monkeypatc
         "openchami_coding_agent.utils.metadata.version",
         lambda name: versions[name],
     )
-    monkeypatch.setattr("openchami_coding_agent.utils.platform.python_implementation", lambda: "CPython")
+    monkeypatch.setattr("openchami_coding_agent.utils.platform.python_implementation", 
+                        lambda: "CPython")
     monkeypatch.setattr("openchami_coding_agent.utils.platform.python_version", lambda: "3.12.13")
     monkeypatch.setattr("openchami_coding_agent.utils.platform.system", lambda: "Darwin")
     monkeypatch.setattr("openchami_coding_agent.utils.platform.release", lambda: "24.5.0")
     monkeypatch.setattr("openchami_coding_agent.utils.platform.machine", lambda: "arm64")
-    monkeypatch.setattr("openchami_coding_agent.utils.sys", type("FakeSys", (), {"executable": "/venv/bin/python"})())
+    monkeypatch.setattr("openchami_coding_agent.utils.sys", 
+                        type("FakeSys", (), {"executable": "/venv/bin/python"})())
 
     assert format_runtime_environment_summary() == "\n".join(
         [
@@ -128,7 +130,7 @@ def test_format_runtime_environment_summary_renders_detected_versions(monkeypatc
     )
 
 
-def test_format_runtime_environment_summary_falls_back_when_package_metadata_missing(monkeypatch) -> None:
+def test_runtime_environment_summary_falls_back_when_package_metadata_missing(monkeypatch) -> None:
     def fake_version(name: str) -> str:
         raise __import__("importlib").metadata.PackageNotFoundError(name)
 
