@@ -24,7 +24,7 @@ COPY src ./src
 
 ENV PATH="$VIRTUAL_ENV/bin:/root/.local/bin:$PATH"
 
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --no-editable
 
 FROM python:3.12-slim-bookworm AS runtime
 
@@ -42,6 +42,7 @@ RUN apt-get update \
         zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=builder /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /workspace
