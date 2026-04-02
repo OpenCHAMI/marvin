@@ -379,3 +379,40 @@ def test_invoke_agent_uses_stream_and_emits_feedback() -> None:
         "Applied the change and ran focused tests.",
     ]
     assert invocation.content == "Applied the change and ran focused tests."
+
+
+def test_invoke_agent_falls_back_from_structured_planner_parse_error() -> None:
+    class FakeLLM:
+        def __init__(self) -> None:
+            self.calls: list[list[object]] = []
+
+        def invoke(self, messages, config=None):
+            del config
+            self.calls.append(list(messages))
+            return AIMessage(content="1. Inspect the repository\n2. Update generation inputs")
+
+    class FakePlannerAgent:
+        def __init__(self) -> None:
+            self.llm = FakeLLM()
+            self.planner_prompt = "Produce a valid implementation plan."
+
+        def stream(self, inputs):
+            del inputs
+            raise ValueError(
+                "1 validation error for Plan\n"
+                "Invalid JSON: trailing characters at line 2 column 1 [type=json_invalid]"
+            )
+
+        def build_config(self, **kwargs):
+            return kwargs
+
+    agent = FakePlannerAgent()
+
+    invocation = invoke_agent(agent, "plan this migration", verbose_io=False)
+
+    assert invocation.content == "1. Inspect the repository\n2. Update generation inputs"
+    assert len(agent.llm.calls) == 1
+    assert isinstance(agent.llm.calls[0][0], SystemMessage)
+    assert agent.llm.calls[0][0].content == "Produce a valid implementation plan."
+    assert isinstance(agent.llm.calls[0][1], HumanMessage)
+    assert agent.llm.calls[0][1].content == "plan this migration"

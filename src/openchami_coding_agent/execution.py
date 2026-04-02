@@ -14,6 +14,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from .checkpoints import checkpoint_dir, list_executor_checkpoints, parse_snapshot_indices
 from .models import AgentConfig, CheckExecutionResult, PlanStep, RepoSpec
 from .plan_tracking import (
+    compress_structured_plan,
     extract_plan_steps,
     plan_step_names,
     read_tracker_activity,
@@ -45,6 +46,8 @@ from .utils import (
     token_delta,
     truncate_tail,
 )
+
+_MAX_EXECUTION_SUBSTEPS = 5
 
 
 def build_repair_token_usage_provider(
@@ -610,7 +613,12 @@ def _generate_subplan(
         fallback_markdown=invocation.content,
         source="subplanner",
     )
-    substeps = normalized.steps or [main_step]
+    compressed_subplan = compress_structured_plan(
+        normalized,
+        max_steps=_MAX_EXECUTION_SUBSTEPS,
+        source="subplanner-compressed",
+    )
+    substeps = compressed_subplan.steps or [main_step]
     subplan_delta = token_delta(planner_baseline, extract_agent_tokens(planner))
     _record_token_event(
         token_events,

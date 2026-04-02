@@ -19,6 +19,7 @@ from .config import default_working_directory, ensure_repo, render_status
 from .execution import execute_plan, extract_repo_sequence_from_plan
 from .models import AgentConfig, PlanStep
 from .plan_tracking import (
+    compress_structured_plan,
     extract_plan_steps,
     initialize_plan_artifacts,
     plan_step_names,
@@ -57,6 +58,8 @@ from .utils import (
     write_json_file,
     write_text_file,
 )
+
+_MAX_EXECUTION_MAIN_STEPS = 10
 
 
 def make_agent_llm(config: AgentConfig, role: str):
@@ -139,11 +142,16 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
         fallback_markdown=plan_markdown,
         source="planner",
     )
+    compressed_plan = compress_structured_plan(
+        structured_plan,
+        max_steps=_MAX_EXECUTION_MAIN_STEPS,
+        source="planner-compressed",
+    )
     planner_message = extract_brief_model_message(
         plan_markdown,
         fallback="Plan generated.",
     )
-    plan_hash_source = [step.to_payload() for step in structured_plan.steps] or [plan_markdown]
+    plan_hash_source = [step.to_payload() for step in compressed_plan.steps] or [plan_markdown]
 
     plan_payload = {
         "project": cfg.project,
@@ -153,8 +161,15 @@ def generate_plan(cfg: AgentConfig) -> tuple[str, dict[str, Any]]:
         "proposal_markdown": cfg.proposal_markdown,
         "plan_markdown": plan_markdown,
         "plan_hash": hash_plan(plan_hash_source),
-        "structured_plan": structured_plan.to_payload(),
-        "steps": [step.to_payload() for step in structured_plan.steps],
+        "structured_plan": compressed_plan.to_payload(),
+        "steps": [step.to_payload() for step in compressed_plan.steps],
+        "planner_step_count": len(structured_plan.steps),
+        "execution_step_count": len(compressed_plan.steps),
+        "plan_compression": {
+            "applied": len(compressed_plan.steps) < len(structured_plan.steps),
+            "original_step_count": len(structured_plan.steps),
+            "compressed_step_count": len(compressed_plan.steps),
+        },
         "token_usage": extract_agent_tokens(planner),
         "repo_sequence_from_plan": extract_repo_sequence_from_plan(
             plan_markdown,
@@ -241,6 +256,7 @@ def run_pipeline(cfg: AgentConfig) -> int:
             plan_payload.get("structured_plan") or plan_payload.get("steps") or {}
         )
         structured_steps = structured_plan.steps
+        compression_info = plan_payload.get("plan_compression") or {}
         plan_steps = initialize_plan_artifacts(
             workspace,
             plan_markdown,
@@ -258,6 +274,13 @@ def run_pipeline(cfg: AgentConfig) -> int:
             notes=[
                 f"Proposal written to {cfg.proposal_markdown}",
                 f"Plan JSON written to {cfg.plan_json}",
+                (
+                    "Execution plan compressed from "
+                    f"{compression_info.get('original_step_count')} to "
+                    f"{compression_info.get('compressed_step_count')} review units."
+                )
+                if compression_info.get("applied")
+                else "Execution plan kept planner step count unchanged.",
             ],
             reconciliation="Execution has not started yet.",
         )

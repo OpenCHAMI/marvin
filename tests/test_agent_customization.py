@@ -140,4 +140,5 @@ def test_prompt_builders_include_shared_and_specific_agent_customization(tmp_pat
     assert "Overall project:" in subplanner_prompt
     assert "Available repositories:" in subplanner_prompt
     assert "comments must stay accurate and relevant" in subplanner_prompt
-    assert len(subplanner_prompt) < 2500
+    assert "usually 1-3 and rarely more than 5" in subplanner_prompt
+    assert len(subplanner_prompt) < 2700

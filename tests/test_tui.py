@@ -169,6 +169,9 @@ def test_build_token_report_text_shows_live_and_summary_sections() -> None:
     assert "Token Report" in text
     assert "Stage: Executing    Planning: hierarchical" in text
     assert "Last delta sent/received/total: 200/40/240" in text
+    assert "Token rate:" in text
+    assert "Average tokens per main step:" in text
+    assert "Estimated total tokens at current pace:" in text
     assert "Per-stage rollups:" in text
     assert "Highest-cost invocations:" in text
     assert "Observation:" in text
@@ -221,6 +224,17 @@ def test_token_observation_notices_repair_heaviness() -> None:
     assert "repair work is consuming as much thought as delivery" in observation
 
 
+def test_token_observation_prefers_rate_and_projection_over_cumulative_total() -> None:
+    observation = _token_observation(
+        stage="execution",
+        token_usage={"total_tokens": 6000},
+        token_delta_usage={"total_tokens": 200},
+        payload={"elapsed_sec": 60, "progress_fraction": 0.25},
+    )
+
+    assert "burn rate" in observation or "projected finish cost" in observation
+
+
 def test_completion_personality_line_varies_with_token_cost() -> None:
     line = _completion_personality_line(
         {"failed_repos": [], "token_usage": {"total_tokens": 22000}}
@@ -243,6 +257,7 @@ def test_build_marvin_commentary_from_progress_includes_focus_and_pressure() -> 
             token_usage={"total_tokens": 12000},
             failed_repos=1,
             retries=2,
+            elapsed_sec=120,
         ),
         0,
     )
@@ -295,12 +310,13 @@ def test_build_operational_context_uses_base_detail_before_runtime_detail() -> N
             detail="Generating markdown summary",
             base_detail="Planner is consolidating repo goals",
             token_usage={"total_tokens": 9000},
+            elapsed_sec=180,
         )
     )
 
     assert "Planner is consolidating repo goals" in text
     assert "Generating markdown summary" in text
-    assert "token usage is climbing" in text
+    assert "token rate is climbing" in text or "projected token spend" in text
 
 
 def test_build_commentary_entry_combines_tabs_without_prefix_labels() -> None:

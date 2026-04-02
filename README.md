@@ -57,6 +57,8 @@ docker run --rm -it \
 
 The image now follows URSA's `uv`-based container style more closely and installs Marvin from the locked project metadata in `pyproject.toml` and `uv.lock`. Native build dependencies are kept in a separate builder stage and only the working runtime environment is shipped. The container runs from `/workspace`, so the mounted directory is where Marvin reads configs and creates or reuses workspaces. If your repository checks need extra toolchains such as `go`, extend the image rather than pretending Python can solve that.
 
+The bundled runtime image includes a current Go toolchain plus `make`, which means `go`, `gofmt`, and `go vet` are available to Marvin when it needs to work on OpenCHAMI Go services. Tools that normally require separate network installs such as `golangci-lint`, `goimports`, or `govulncheck` are not bundled yet; if a target repository requires them in-container, extend the image or preinstall them in a derivative image.
+
 If you are using OpenAI-backed models, set `OPENAI_API_KEY` before running Marvin. It will not infer your credentials by sheer bitterness.
 
 ## Quick Start

@@ -84,6 +84,8 @@ def test_build_planner_prompt_from_prefix_appends_dynamic_context() -> None:
     assert prompt.startswith(prefix)
     assert build_planner_control_suffix(cfg) in prompt
     assert "comments should remain" in prompt
+    assert "Aim for about 4-10 main steps" in prompt
+    assert "reviewable unit of work" in prompt
 
 
 def test_build_subplanner_prompt_prefix_excludes_main_step_context() -> None:
@@ -94,6 +96,8 @@ def test_build_subplanner_prompt_prefix_excludes_main_step_context() -> None:
     assert "Subplanning context:" not in prefix
     assert "Current main step to expand:" not in prefix
     assert "comments must stay accurate and relevant" in prefix
+    assert "usually 1-3 and rarely more than 5" in prefix
+    assert "Each sub-step may become its own commit" in prefix
 
 
 def test_build_subplanner_prompt_from_prefix_appends_main_step_context() -> None:

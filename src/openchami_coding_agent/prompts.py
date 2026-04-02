@@ -10,6 +10,9 @@ _MAX_PLAN_DIGEST_STEPS = 8
 _MAX_STEP_DETAIL_CHARS = 160
 _MAX_PROBLEM_CHARS = 600
 _MAX_FAILURE_CHARS = 4000
+_SOFT_MAIN_PLAN_STEP_MIN = 4
+_SOFT_MAIN_PLAN_STEP_MAX = 10
+_SOFT_SUBPLAN_STEP_MAX = 5
 
 
 def _clip_text(text: str, max_chars: int) -> str:
@@ -68,6 +71,38 @@ def _comment_preservation_instruction() -> str:
         "Preserve useful existing comments. Change comments only when the related "
         "implementation changes or the comment is inaccurate, and keep all comments "
         "accurate and relevant to the code they describe."
+    )
+
+
+def _main_plan_size_guidance(cfg: AgentConfig) -> str:
+    commit_guidance = (
+        " Treat each main step as a reviewable unit of work that would make sense "
+        "to review independently."
+        if cfg.commit_each_step
+        else ""
+    )
+    return (
+        f"Aim for about {_SOFT_MAIN_PLAN_STEP_MIN}-{_SOFT_MAIN_PLAN_STEP_MAX} main "
+        "steps for non-trivial tasks. Return fewer for small tasks. Exceed that "
+        "range only when the work truly requires additional distinct reviewable units, "
+        "and keep the count as low as possible by merging adjacent micro-steps."
+        f"{commit_guidance}"
+    )
+
+
+def _subplan_size_guidance(cfg: AgentConfig) -> str:
+    commit_guidance = (
+        " Each sub-step may become its own commit during hierarchical execution, so "
+        "avoid splitting reconnaissance, formatting, validation, or cleanup into "
+        "separate sub-steps unless that work genuinely deserves an independent review."
+        if cfg.commit_each_step
+        else ""
+    )
+    return (
+        f"Use the smallest useful number of sub-steps, usually 1-3 and rarely more "
+        f"than {_SOFT_SUBPLAN_STEP_MAX}. If the main step is already atomic, return "
+        "exactly one sub-step that closely matches it."
+        f"{commit_guidance}"
     )
 
 
@@ -187,6 +222,7 @@ Output requirements:
 10. When planning code edits, preserve useful existing comments unless the
     implementation changes or the comment is inaccurate; comments should remain
     accurate and relevant.
+11. {_main_plan_size_guidance(cfg)}
 
 Structured step schema requirements:
 - Each executable step should have a short `name`.
@@ -401,6 +437,7 @@ Requirements:
 6. If this main step is already atomic, return exactly one sub-step that matches it closely.
 7. Assume useful existing comments should be preserved unless the implementation
     changes or the comment is inaccurate; comments must stay accurate and relevant.
+8. {_subplan_size_guidance(cfg)}
 """.strip()
 
 

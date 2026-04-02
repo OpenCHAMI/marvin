@@ -1,0 +1,94 @@
+project: OpenCHAMI boot-service Fabrica migration
+problem: |-
+  Update OpenCHAMI's boot-service so the current implementation evolves from an older, incompatible Fabrica generation baseline to the current Fabrica model and workflow without regressing existing behavior.
+
+  Repository evidence indicates boot-service already uses Fabrica-derived structure, depends on `github.com/openchami/fabrica v0.3.0`, documents `fabrica generate` in the README, and exposes a legacy compatibility mode through `enable_legacy_api` for legacy BSS-compatible endpoints. The migration must therefore start by inspecting the checked-out repository to determine exactly which handlers, models, generated files, and custom code paths came from the older Fabrica output versus later handwritten additions.
+
+  The work should preserve the externally visible behavior of all legacy non-Fabrica-generated routes and keep their existing tests passing. It is acceptable to update existing tests where the new Fabrica-generated code changes resource envelopes, generated handler behavior, validation, or OpenAPI-related details, but only where those tests are tied to Fabrica-generated paths or internals rather than legacy compatibility endpoints.
+
+  The implementation must use Fabrica's current source-of-truth workflow rather than patching generated outputs directly. That means identifying the relevant `.fabrica.yaml`, `apis.yaml`, versioned `apis/<group>/<version>/*_types.go` inputs, safe customization points such as `cmd/server/main.go`, and all generated fallout that must be regenerated and reviewed with `fabrica generate`. If the repo's current layout differs from Fabrica's documented workflow, the plan must explain the divergence and migrate toward the new supported structure incrementally rather than rewriting the service blindly.
+
+  Before coding, inspect the repository structure, generated/non-generated boundaries, route registration, tests, and configuration. Produce a Markdown proposal describing the current architecture, the old-versus-new Fabrica compatibility gaps, the migration sequence, files likely to change, test strategy, legacy API protection strategy, and any assumptions or deferrals. Then implement in phased, reviewable steps and produce a final summary artifact with files changed, commands run, and remaining follow-up work.
+mode: plan_and_execute
+
+repos:
+  - name: boot-service
+    url: https://github.com/OpenCHAMI/boot-service.git
+    branch: main
+    checkout: true
+    language: go
+    description: Boot-service repo using Fabrica-generated REST API structure plus legacy BSS-compatible routes and compatibility tests.
+    checks:
+      - make test
+      - go test ./...
+
+models:
+  default: openai:gpt-5.4
+
+agent:
+  prompt_appendix_path: prompt-library/appendices/openchami-shared.md
+  executor_prompt_appendix_path: prompt-library/appendices/fabrica-executor.md
+  planner_prompt_appendix: |-
+    Planner guidance for boot-service Fabrica migration:
+    - Inspect the checked-out repo before assuming how older Fabrica output differs from the current generator.
+    - Identify which routes, handlers, models, and tests are Fabrica-generated versus legacy compatibility code.
+    - Treat legacy non-Fabrica routes as compatibility-critical and keep their validation explicit in the plan.
+    - Name the exact generation inputs and safe-edit boundaries before proposing code changes.
+    - Include regeneration and post-generation review steps whenever source inputs change.
+
+task:
+  execute_after_plan: true
+  confirm_before_execute: true
+  confirm_timeout_sec: 120
+
+  deliverables:
+    - Markdown migration proposal grounded in the actual boot-service repository layout and current Fabrica workflow.
+    - Boot-service updates that migrate the service from the older incompatible Fabrica generation baseline to the newer supported Fabrica model.
+    - Regenerated Fabrica outputs where required, with source-input changes made in the correct files rather than patching generated code directly.
+    - Preserved behavior and passing tests for all legacy non-Fabrica-generated routes.
+    - Updated or added tests covering the migrated Fabrica-generated code paths and any changed generated behavior.
+    - Documentation updates for any changed generation workflow, developer steps, or compatibility notes.
+    - Final execution summary artifact listing files changed, tests run, and any intentional deferrals.
+
+  plan_requirements:
+    - Inspect the current repository layout and identify the Fabrica source inputs, generated outputs, and safe customization points.
+    - Identify all legacy non-Fabrica-generated routes or handlers and how they are registered and tested.
+    - Distinguish between changes needed for Fabrica-generated paths and changes that must not alter legacy compatibility behavior.
+    - Compare the checked-out boot-service structure against the documented current Fabrica workflow and call out the compatibility gaps explicitly.
+    - Sequence work dependency-first: source model/config updates, generation, integration fixes, then test updates.
+    - Include explicit validation commands for each major phase, with legacy compatibility checks called out separately when possible.
+    - Call out any assumptions about which tests are tied to Fabrica-generated behavior versus legacy API behavior.
+
+  execution_requirements:
+    - Preserve all legacy non-Fabrica-generated routes and ensure their legacy tests continue to pass.
+    - It is acceptable to update existing tests for Fabrica-generated paths when the new generator changes envelopes, validation, or generated internals, but preserve user-visible legacy API compatibility.
+    - Do not hand-edit `*_generated.go` files unless the task is explicitly about the generator itself.
+    - Update Fabrica source inputs first and run `fabrica generate` when required by the migration.
+    - Keep changes incremental and reviewable rather than rewriting boot-service wholesale.
+    - Follow the repository's actual Go, Fabrica, configuration, and test patterns discovered during inspection.
+    - Run tests after each meaningful migration step and report which legacy and Fabrica-generated paths were validated.
+    - If the repository contains custom code inside or near generated boundaries, handle that migration carefully and document the chosen approach.
+    - Update docs when developer workflow or generation expectations change.
+
+  notes:
+    - "Boot-service README documents a Fabrica workflow including `fabrica generate` and `go run cmd/server/main.go`."
+    - "Boot-service go.mod currently references github.com/openchami/fabrica v0.3.0 and should be inspected for migration implications."
+    - "config.example.yaml includes `enable_legacy_api: true` and describes legacy BSS-compatible endpoints as an explicit compatibility surface."
+    - "Use the Fabrica brief and executor appendix in this Marvin repo as guidance, but validate all assumptions against the checked-out boot-service repository."
+    - "Prefer repo-native validation commands such as `make test` when they exist, then add focused Go test commands as needed."
+
+execution:
+  max_parallel_checks: 2
+  max_check_retries: 1
+  skip_failed_repos: false
+  check_command_timeout_sec: 1800
+  check_output_tail_chars: 16000
+  resume_execution_state: true
+  verbose_io: false
+  commit_each_step: true
+
+outputs:
+  proposal_markdown: docs/boot-service-fabrica-migration-proposal.md
+  plan_json: artifacts/boot-service-fabrica-migration-plan.json
+  summary_json: artifacts/boot-service-fabrica-migration-summary.json
+  executor_progress_json: artifacts/boot-service-fabrica-migration-progress.json

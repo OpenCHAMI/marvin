@@ -69,6 +69,58 @@ def _cache_summary_text(summary: dict[str, Any]) -> str:
     )
 
 
+def _tokens_per_minute(tokens: dict[str, Any], elapsed_sec: float | None) -> float | None:
+    total_tokens = int(tokens.get("total_tokens", 0) or 0)
+    if total_tokens <= 0 or elapsed_sec is None or elapsed_sec <= 0:
+        return None
+    return total_tokens / (elapsed_sec / 60.0)
+
+
+def _average_tokens_per_main_step(snapshot: ProgressSnapshot) -> float | None:
+    total_tokens = int(snapshot.token_usage.get("total_tokens", 0) or 0)
+    completed_steps = int(snapshot.current_main_step or 0)
+    if total_tokens <= 0 or completed_steps <= 0:
+        return None
+    return total_tokens / completed_steps
+
+
+def _progress_fraction(snapshot: ProgressSnapshot) -> float | None:
+    if snapshot.current_main_step is not None and snapshot.current_main_total > 0:
+        fraction = snapshot.current_main_step / snapshot.current_main_total
+        if snapshot.current_sub_step is not None and snapshot.current_sub_total > 0:
+            main_span = 1 / snapshot.current_main_total
+            fraction = ((snapshot.current_main_step - 1) / snapshot.current_main_total) + (
+                main_span * (snapshot.current_sub_step / snapshot.current_sub_total)
+            )
+        return max(0.0, min(fraction, 1.0))
+
+    if snapshot.total_repos > 0 and snapshot.completed_repos > 0:
+        return max(0.0, min(snapshot.completed_repos / snapshot.total_repos, 1.0))
+    return None
+
+
+def _estimated_total_tokens(snapshot: ProgressSnapshot) -> int | None:
+    total_tokens = int(snapshot.token_usage.get("total_tokens", 0) or 0)
+    fraction = _progress_fraction(snapshot)
+    if total_tokens <= 0 or fraction is None or fraction <= 0 or fraction >= 1:
+        return None
+    return int(round(total_tokens / fraction))
+
+
+def _token_rate_summary(snapshot: ProgressSnapshot) -> str:
+    rate = _tokens_per_minute(snapshot.token_usage, snapshot.elapsed_sec)
+    per_step = _average_tokens_per_main_step(snapshot)
+    estimated_total = _estimated_total_tokens(snapshot)
+    parts: list[str] = []
+    if rate is not None:
+        parts.append(f"rate {format_compact_count(int(round(rate)))}/min")
+    if per_step is not None:
+        parts.append(f"avg {format_compact_count(int(round(per_step)))}/main step")
+    if estimated_total is not None:
+        parts.append(f"est total {format_compact_count(estimated_total)}")
+    return ", ".join(parts)
+
+
 def _progress_focus_phrase(snapshot: ProgressSnapshot) -> str:
     parts: list[str] = []
     if snapshot.current_main_step is not None and snapshot.current_main_total:
@@ -117,15 +169,21 @@ def format_commentary_log_entry(text: str, *, timestamp: str | None = None) -> s
 
 
 def _progress_pressure_phrase(snapshot: ProgressSnapshot) -> str:
-    total_tokens = int(snapshot.token_usage.get("total_tokens", 0) or 0)
+    token_rate = _tokens_per_minute(snapshot.token_usage, snapshot.elapsed_sec)
+    estimated_total = _estimated_total_tokens(snapshot)
+    average_per_step = _average_tokens_per_main_step(snapshot)
     if snapshot.failed_repos > 0:
         return f"{snapshot.failed_repos} repo failure(s) are currently objecting"
     if snapshot.retries > 0:
         return f"retry count is up to {snapshot.retries}, which is rarely a compliment"
-    if total_tokens >= 20_000:
-        return "token expenditure is entering the theatrical range"
-    if total_tokens >= 8_000:
-        return "token usage is climbing in a way finance would dislike"
+    if token_rate is not None and token_rate >= 5_000:
+        return "token burn rate is theatrical enough to attract accounting"
+    if token_rate is not None and token_rate >= 2_000:
+        return "token rate is climbing in a way finance would dislike"
+    if estimated_total is not None and estimated_total >= 20_000:
+        return "projected token spend is entering the theatrical range"
+    if average_per_step is not None and average_per_step >= 2_500:
+        return "average token cost per main step is getting indulgent"
     if snapshot.total_repos and snapshot.completed_repos:
         return (
             f"repo progress is {snapshot.completed_repos}/{snapshot.total_repos}, "
@@ -155,24 +213,80 @@ def _token_observation(
 ) -> str:
     total_tokens = int(token_usage.get("total_tokens", 0) or 0)
     delta_total = int(token_delta_usage.get("total_tokens", 0) or 0)
+    elapsed_sec = payload.get("duration_sec")
+    if elapsed_sec is None:
+        elapsed_sec = payload.get("elapsed_sec")
     rollups = payload.get("token_usage_by_stage") or {}
     execution_total = int(((rollups.get("execution") or {}).get("total_tokens", 0)) or 0)
     repair_total = int(((rollups.get("repair") or {}).get("total_tokens", 0)) or 0)
+    rate = _tokens_per_minute(token_usage, elapsed_sec)
+
+    progress_fraction = payload.get("progress_fraction")
+    estimated_total: int | None = None
+    if isinstance(progress_fraction, (int, float)) and 0 < float(progress_fraction) < 1:
+        estimated_total = (
+            int(round(total_tokens / float(progress_fraction)))
+            if total_tokens > 0
+            else None
+        )
 
     if repair_total and repair_total >= execution_total and repair_total > 0:
         return (
             "Observation: repair work is consuming as much thought as delivery, "
             "which is unflattering."
         )
+    if rate is not None and rate >= 5_000:
+        return "Observation: the current token burn rate is energetic enough to require witnesses."
+    if rate is not None and rate >= 2_000:
+        return (
+            "Observation: token rate is elevated, which usually means the run is "
+            "thinking in paragraphs."
+        )
+    if estimated_total is not None and estimated_total >= 20_000:
+        return "Observation: projected finish cost is now openly dramatic."
     if delta_total >= 1_500:
         return "Observation: the latest update was expensive enough to leave a mark."
-    if total_tokens >= 20_000:
-        return "Observation: cumulative token usage is now openly dramatic."
     if stage == "planning":
-        return "Observation: planning remains cheaper than improvising damage control later."
+        return "Observation: planning rate remains cheaper than improvising damage control later."
     if stage == "validation":
         return "Observation: validation is where optimism is audited."
     return "Observation: the token budget is still intact, if not cheerful."
+
+
+def _token_projection_lines(
+    *,
+    token_usage: dict[str, int],
+    elapsed_sec: float | None,
+    progress_fraction: float | None = None,
+    average_per_step: float | None = None,
+) -> list[str]:
+    rate = _tokens_per_minute(token_usage, elapsed_sec)
+    estimated_total: int | None = None
+    if progress_fraction is not None and 0 < progress_fraction < 1:
+        total_tokens = int(token_usage.get("total_tokens", 0) or 0)
+        if total_tokens > 0:
+            estimated_total = int(round(total_tokens / progress_fraction))
+
+    lines: list[str] = []
+    if rate is not None:
+        lines.append(f"Token rate: {format_compact_count(int(round(rate)))}/min")
+    else:
+        lines.append("Token rate: not enough runtime yet.")
+    if average_per_step is not None:
+        lines.append(
+            "Average tokens per main step: "
+            f"{format_compact_count(int(round(average_per_step)))}"
+        )
+    else:
+        lines.append("Average tokens per main step: waiting for step progress.")
+    if estimated_total is not None:
+        lines.append(
+            "Estimated total tokens at current pace: "
+            f"{format_compact_count(estimated_total)}"
+        )
+    else:
+        lines.append("Estimated total tokens: waiting for enough progress to extrapolate.")
+    return lines
 
 
 def build_marvin_commentary_from_progress(
@@ -398,6 +512,36 @@ def build_token_report_text(
     elapsed_sec: float | None,
     payload: dict[str, Any],
 ) -> str:
+    progress_fraction: float | None = None
+    step_match = re.search(r"main\s+(\d+)/(\d+)", current_step)
+    if step_match:
+        numerator = int(step_match.group(1))
+        denominator = int(step_match.group(2))
+        if denominator > 0:
+            progress_fraction = max(0.0, min(numerator / denominator, 1.0))
+    elif repo_progress and "/" in repo_progress:
+        try:
+            completed_str, total_str = repo_progress.split("/", 1)
+            completed = int(completed_str)
+            total = int(total_str)
+            if total > 0 and completed > 0:
+                progress_fraction = max(0.0, min(completed / total, 1.0))
+        except ValueError:
+            progress_fraction = None
+
+    average_per_step: float | None = None
+    if step_match:
+        completed_steps = int(step_match.group(1))
+        total_tokens = int(token_usage.get("total_tokens", 0) or 0)
+        if completed_steps > 0 and total_tokens > 0:
+            average_per_step = total_tokens / completed_steps
+
+    enriched_payload = dict(payload)
+    if elapsed_sec is not None:
+        enriched_payload.setdefault("elapsed_sec", elapsed_sec)
+    if progress_fraction is not None:
+        enriched_payload.setdefault("progress_fraction", progress_fraction)
+
     lines = [
         "Token Report",
         "",
@@ -405,7 +549,7 @@ def build_token_report_text(
             stage=stage,
             token_usage=token_usage,
             token_delta_usage=token_delta_usage,
-            payload=payload,
+            payload=enriched_payload,
         ),
         "",
         f"Workspace: {workspace_name}",
@@ -420,6 +564,12 @@ def build_token_report_text(
         (
             f"Last delta {_token_triplet_label(token_delta_usage)}: "
             f"{_format_token_triplet(token_delta_usage)}"
+        ),
+        *_token_projection_lines(
+            token_usage=token_usage,
+            elapsed_sec=elapsed_sec,
+            progress_fraction=progress_fraction,
+            average_per_step=average_per_step,
         ),
         f"Elapsed: {format_elapsed_runtime(elapsed_sec)}",
         "",

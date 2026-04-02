@@ -9,6 +9,8 @@ from pathlib import Path
 
 from .models import PlanStep, StructuredPlan
 
+_COMPRESSED_STEP_NAME_MAX_CHARS = 96
+
 
 def plan_directory(workspace: Path) -> Path:
     directory = workspace / "plan"
@@ -114,6 +116,37 @@ def structured_plan_from_agent_response(
     return StructuredPlan(source=source)
 
 
+def compress_structured_plan(
+    structured_plan: StructuredPlan | list[PlanStep] | None,
+    *,
+    max_steps: int,
+    source: str | None = None,
+) -> StructuredPlan:
+    if structured_plan is None:
+        return StructuredPlan(source=source or "compressed")
+
+    normalized = structured_plan_from_data(structured_plan, source=source or "compressed")
+    steps = list(normalized.steps)
+    if max_steps < 1 or len(steps) <= max_steps:
+        return StructuredPlan(steps=steps, source=normalized.source)
+
+    base_size, remainder = divmod(len(steps), max_steps)
+    group_sizes = [base_size + (1 if index < remainder else 0) for index in range(max_steps)]
+
+    merged_steps: list[PlanStep] = []
+    start = 0
+    for group_size in group_sizes:
+        if group_size <= 0:
+            continue
+        group = steps[start : start + group_size]
+        if group:
+            merged_steps.append(_merge_plan_step_group(group))
+        start += group_size
+
+    merged_source = source or f"{normalized.source}-compressed"
+    return StructuredPlan(steps=merged_steps, source=merged_source)
+
+
 def _extract_plan_steps_from_json(raw_text: str) -> list[str]:
     candidate_texts: list[str] = []
     stripped = raw_text.strip()
@@ -146,6 +179,65 @@ def _extract_plan_steps_from_json(raw_text: str) -> list[str]:
         if extracted:
             return extracted
     return []
+
+
+def _merge_plan_step_group(steps: list[PlanStep]) -> PlanStep:
+    if len(steps) == 1:
+        return steps[0]
+
+    details: list[str] = []
+    for index, step in enumerate(steps, start=1):
+        detail = step.description.strip()
+        if detail and detail.lower() != step.name.strip().lower():
+            details.append(f"- {index}. {step.name}: {detail}")
+        else:
+            details.append(f"- {index}. {step.name}")
+
+    description = "\n".join(
+        [
+            "Compressed execution unit combining adjacent planned steps:",
+            *details,
+        ]
+    )
+    return PlanStep(
+        name=_merge_step_name(steps),
+        description=description,
+        expected_outputs=_merge_step_lists(step.expected_outputs for step in steps),
+        success_criteria=_merge_step_lists(step.success_criteria for step in steps),
+        requires_code=any(step.requires_code for step in steps),
+    )
+
+
+def _merge_step_name(steps: list[PlanStep]) -> str:
+    first = steps[0].name.strip()
+    last = steps[-1].name.strip()
+    if len(steps) == 2:
+        name = f"{first}; {last}"
+    else:
+        name = f"{first} through {last}"
+    return _clip_step_name(name)
+
+
+def _clip_step_name(name: str) -> str:
+    if len(name) <= _COMPRESSED_STEP_NAME_MAX_CHARS:
+        return name
+    return name[: _COMPRESSED_STEP_NAME_MAX_CHARS - 3].rstrip() + "..."
+
+
+def _merge_step_lists(groups: object) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for items in groups:
+        for raw in items:
+            value = str(raw).strip()
+            if not value:
+                continue
+            lowered = value.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            merged.append(value)
+    return merged
 
 
 def plan_step_names(structured_plan: StructuredPlan | list[PlanStep] | None) -> list[str]:

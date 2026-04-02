@@ -15,7 +15,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from .models import InvocationCapture
 from .ursa_compat import load_json_file, save_json_file
@@ -727,27 +727,32 @@ def invoke_agent(
     out_ctx = nullcontext() if verbose_io else redirect_stdout(stdout_buffer)
     err_ctx = nullcontext() if verbose_io else redirect_stderr(stderr_buffer)
     with out_ctx, err_ctx:
-        if hasattr(agent, "stream"):
-            last_chunk: Any | None = None
-            last_contentful_chunk: Any | None = None
-            last_feedback = ""
-            for chunk in agent.stream({"messages": [HumanMessage(content=prompt)]}):
-                last_chunk = chunk
-                chunk_content = extract_response_content(chunk)
-                if chunk_content and chunk_content != str(chunk):
-                    last_contentful_chunk = chunk
-                if feedback_callback is None:
-                    continue
-                feedback = extract_stream_chunk_message(chunk, fallback="", max_chars=None)
-                if feedback and feedback != last_feedback:
-                    last_feedback = feedback
-                    feedback_callback(feedback)
-            if last_chunk is None:
-                response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
+        try:
+            if hasattr(agent, "stream"):
+                last_chunk: Any | None = None
+                last_contentful_chunk: Any | None = None
+                last_feedback = ""
+                for chunk in agent.stream({"messages": [HumanMessage(content=prompt)]}):
+                    last_chunk = chunk
+                    chunk_content = extract_response_content(chunk)
+                    if chunk_content and chunk_content != str(chunk):
+                        last_contentful_chunk = chunk
+                    if feedback_callback is None:
+                        continue
+                    feedback = extract_stream_chunk_message(chunk, fallback="", max_chars=None)
+                    if feedback and feedback != last_feedback:
+                        last_feedback = feedback
+                        feedback_callback(feedback)
+                if last_chunk is None:
+                    response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
+                else:
+                    response = last_contentful_chunk or last_chunk
             else:
-                response = last_contentful_chunk or last_chunk
-        else:
-            response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
+                response = agent.invoke({"messages": [HumanMessage(content=prompt)]})
+        except Exception as exc:
+            if not _should_fallback_to_plain_llm(agent, exc):
+                raise
+            response = _invoke_agent_plain_llm_fallback(agent, prompt)
 
     content = extract_response_content(response)
 
@@ -757,3 +762,32 @@ def invoke_agent(
         captured_stderr=stderr_buffer.getvalue(),
         raw_response=response,
     )
+
+
+def _should_fallback_to_plain_llm(agent: Any, exc: Exception) -> bool:
+    if not hasattr(agent, "llm") or not hasattr(agent, "planner_prompt"):
+        return False
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "json_invalid",
+            "invalid json",
+            "trailing characters",
+            "validationerror",
+        )
+    )
+
+
+def _invoke_agent_plain_llm_fallback(agent: Any, prompt: str) -> Any:
+    messages = [
+        SystemMessage(content=str(getattr(agent, "planner_prompt", "")).strip()),
+        HumanMessage(content=prompt),
+    ]
+    llm = agent.llm
+    if hasattr(agent, "build_config"):
+        try:
+            return llm.invoke(messages, agent.build_config(tags=["planner", "fallback"]))
+        except TypeError:
+            return llm.invoke(messages)
+    return llm.invoke(messages)

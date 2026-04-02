@@ -2,6 +2,7 @@ from pathlib import Path
 
 from openchami_coding_agent.models import PlanStep
 from openchami_coding_agent.plan_tracking import (
+    compress_structured_plan,
     initialize_plan_artifacts,
     plan_step_names,
     read_tracker_activity,
@@ -129,3 +130,64 @@ def test_structured_plan_from_markdown_normalizes_numbered_steps() -> None:
         "Inspect the repository layout",
         "Add focused tests",
     ]
+
+
+def test_compress_structured_plan_keeps_small_plan_unchanged() -> None:
+    original = [
+        PlanStep(name="Inspect repo"),
+        PlanStep(name="Add tests"),
+    ]
+
+    compressed = compress_structured_plan(original, max_steps=4, source="planner-compressed")
+
+    assert plan_step_names(compressed) == ["Inspect repo", "Add tests"]
+    assert compressed.source == "planner-compressed"
+
+
+def test_compress_structured_plan_merges_adjacent_steps_into_review_units() -> None:
+    original = [
+        PlanStep(
+            name="Inspect repo",
+            description="Review the current package layout.",
+            expected_outputs=["inventory"],
+            success_criteria=["modules identified"],
+            requires_code=False,
+        ),
+        PlanStep(
+            name="Add prompt controls",
+            description="Add planner controls for step count.",
+            expected_outputs=["prompt update"],
+            success_criteria=["planner guidance updated"],
+        ),
+        PlanStep(
+            name="Update tests",
+            description="Add prompt regression coverage.",
+            expected_outputs=["prompt tests"],
+            success_criteria=["tests cover new behavior"],
+        ),
+        PlanStep(
+            name="Run validation",
+            description="Run focused pytest coverage.",
+            expected_outputs=["test output"],
+            success_criteria=["pytest passes"],
+            requires_code=False,
+        ),
+    ]
+
+    compressed = compress_structured_plan(original, max_steps=2, source="planner-compressed")
+
+    assert plan_step_names(compressed) == [
+        "Inspect repo; Add prompt controls",
+        "Update tests; Run validation",
+    ]
+    assert compressed.steps[0].description.startswith(
+        "Compressed execution unit combining adjacent planned steps:"
+    )
+    assert "Inspect repo: Review the current package layout." in compressed.steps[0].description
+    assert compressed.steps[0].expected_outputs == ["inventory", "prompt update"]
+    assert compressed.steps[0].success_criteria == [
+        "modules identified",
+        "planner guidance updated",
+    ]
+    assert compressed.steps[0].requires_code is True
+    assert compressed.source == "planner-compressed"
