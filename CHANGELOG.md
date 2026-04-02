@@ -12,6 +12,9 @@ All notable changes to this project are documented in this file.
 - Added a merged recommended-config artifact for workspace analysis so suggested YAML changes do not need to be reconstructed by hand.
 - Added a direct `analyze-workspace` CLI command so previous workspaces can be investigated without authoring a second task YAML.
 - Added a structured `marvin_partial_success.json` artifact derived from the execution run trace, and began routing CLI/TUI completion summaries through shared summary helpers.
+- Added an editable `marvin_operator_feedback.md` artifact and wired its notes back into resume, repair, and workspace-analysis flows, including optional hierarchical subplan refresh on resume.
+- Added scoped hierarchical resume policy derived from failure classes so Marvin can refresh only the current subplan or all pending subplans instead of relying on a single yes/no hint.
+- Added `marvin_recommended_operator_feedback.md` so workspace analysis can emit suggested edits for the next resume cycle alongside the merged YAML recommendation.
 
 ## [0.1.0] - 2026-03-18
 

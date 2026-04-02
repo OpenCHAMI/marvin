@@ -102,6 +102,8 @@ uv run marvin path/to/task.yaml --workspace ./tokensmith-run --resume
 Set `mode: analyze_workspace` in the YAML when you want Marvin to inspect an existing workspace instead of planning or executing code. In that mode Marvin uses the planner agent in hierarchical mode, reviews prior artifacts, asks clarification questions when needed unless `--non-interactive` is set, and writes separate workspace-analysis artifacts.
 
 When available, workspace analysis now also reads Marvin's structured run trace and partial-success artifact, so failed or incomplete runs carry forward more than a single narrative summary.
+If you add notes to Marvin's operator-feedback artifact before resuming, workspace analysis reads that too instead of pretending the machine was the only witness.
+Workspace analysis can also emit a recommended operator-feedback artifact for the next resume cycle when the YAML change alone would not be enough.
 
 If you do not want to write a second YAML just to investigate a previous run, use the direct CLI command instead:
 
@@ -142,7 +144,7 @@ Marvin supports these top-level `mode` values:
 - `plan`: generate the proposal and plan artifacts, then stop.
 - `execute`: execute against an existing proposal in the workspace.
 - `plan_and_execute`: plan first, then execute.
-- `analyze_workspace`: inspect an existing workspace, identify likely failure causes, and recommend YAML updates for the next run.
+- `analyze_workspace`: inspect an existing workspace, identify likely failure causes, recommend YAML updates for the next run, and suggest operator-feedback edits when the next resume needs better human guidance.
 
 `analyze_workspace` requires an existing workspace path via `--workspace`, `workspace`, or `restart_workspace`. It does not materialize repos or execute code. It reads prior artifacts, repository state, and tracker data, then writes a markdown report plus JSON analysis payload.
 
@@ -157,9 +159,11 @@ Marvin writes and updates these artifacts in the workspace:
 - `artifacts/marvin_executor_progress.json`: persisted execution state for resume.
 - `artifacts/marvin_execution_summary.json`: final execution summary, including token rollups.
 - `artifacts/marvin_partial_success.json`: structured learning artifact derived from the run trace, including completed steps, unresolved blockers, and suggested operator feedback for the next run.
+- `artifacts/marvin_operator_feedback.md`: editable operator notes for the next repair or resume cycle, including `refresh_subplans: no|current|yes` to control how much hierarchical planning should be regenerated on resume.
 - `artifacts/marvin_workspace_analysis.md`: workspace-analysis report for `mode: analyze_workspace`.
 - `artifacts/marvin_workspace_analysis.json`: machine-readable workspace-analysis payload.
 - `artifacts/marvin_recommended_config.yaml`: merged recommended config produced from the analysis YAML patch.
+- `artifacts/marvin_recommended_operator_feedback.md`: analysis-suggested operator-feedback edits for the next repair or resume cycle.
 - `artifacts/marvin_source_config.yaml`: snapshot of the original task config used to improve future workspace analysis.
 - `checkpoints/*.db`: executor and planner checkpoint snapshots.
 
@@ -296,6 +300,8 @@ outputs:
 	plan_json: artifacts/marvin_plan.json
 	executor_progress_json: artifacts/marvin_executor_progress.json
 	summary_json: artifacts/marvin_execution_summary.json
+	partial_success_json: artifacts/marvin_partial_success.json
+	operator_feedback_markdown: artifacts/marvin_operator_feedback.md
 
 agent:
 	name: Marvin
@@ -335,7 +341,17 @@ Important fields:
 - `outputs.*`: artifact paths within the workspace.
 - `outputs.workspace_analysis_markdown|workspace_analysis_json`: analysis artifact paths used by `mode: analyze_workspace`.
 - `outputs.recommended_config_yaml`: full merged config artifact written by `mode: analyze_workspace`.
+- `outputs.partial_success_json|operator_feedback_markdown`: learning and operator-feedback artifacts used by resume, repair, and workspace analysis.
 - `agent.*`: prompt customization and persona controls.
+
+### Resume Feedback Loop
+
+After execution, Marvin writes two related artifacts:
+
+- `marvin_partial_success.json`: structured machine-readable learning about what finished, what failed, and what likely needs clarification.
+- `marvin_operator_feedback.md`: an editable note file seeded from that learning artifact.
+
+If you update `marvin_operator_feedback.md` before resuming, Marvin reads those notes back into resumed execution and repair prompts. In hierarchical mode, setting `refresh_subplans: yes` tells Marvin to discard pending cached subplans and regenerate them for the remaining main steps on resume.
 
 ### Reference Repositories
 
