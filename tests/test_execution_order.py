@@ -1,8 +1,13 @@
+import json
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from openchami_coding_agent.execution import (
+    _maybe_refresh_hierarchical_subplans,
+    execute_plan,
     extract_repo_sequence_from_plan,
     marvin_plan_step_detail,
     normalize_next_step_index,
@@ -11,7 +16,7 @@ from openchami_coding_agent.execution import (
     summarize_token_events,
     topological_order,
 )
-from openchami_coding_agent.models import AgentConfig, RepoSpec
+from openchami_coding_agent.models import AgentConfig, InvocationCapture, RepoSpec, RunTrace, RunTraceEvent
 from openchami_coding_agent.plan_tracking import extract_plan_steps
 
 
@@ -55,6 +60,23 @@ def test_resolve_repo_execution_order_respects_repo_order_when_valid() -> None:
     )
     ordered = resolve_repo_execution_order(cfg, plan_markdown="")
     assert [repo.name for repo in ordered] == ["c", "b", "a"]
+
+
+def test_resolve_repo_execution_order_excludes_read_only_repos() -> None:
+    cfg = AgentConfig(
+        project="OpenCHAMI",
+        problem="test",
+        repos=[
+            RepoSpec(name="reference", path=Path("/tmp/reference"), read_only=True),
+            RepoSpec(name="service", path=Path("/tmp/service")),
+            RepoSpec(name="worker", path=Path("/tmp/worker")),
+        ],
+        repo_order=["worker", "service"],
+    )
+
+    ordered = resolve_repo_execution_order(cfg, plan_markdown="1. Review reference\n2. Update worker")
+
+    assert [repo.name for repo in ordered] == ["worker", "service"]
 
 
 def test_extract_plan_steps_parses_numbered_and_checkbox_lines() -> None:
@@ -117,10 +139,24 @@ def test_select_execution_agent_class_auto_selects_gitgo_for_go_repo() -> None:
     cfg = AgentConfig(
         project="OpenCHAMI",
         problem="test",
-        repos=[RepoSpec(name="go", path=Path("/tmp/go"), language="go")],
+        repos=[
+            RepoSpec(name="reference", path=Path("/tmp/reference"), read_only=True),
+            RepoSpec(name="go", path=Path("/tmp/go"), language="go"),
+        ],
         execution={"executor_agent": "auto"},
     )
     assert select_execution_agent_class(cfg).__name__ == "GitGoAgent"
+
+
+def test_select_execution_agent_class_rejects_reference_only_configs() -> None:
+    cfg = AgentConfig(
+        project="OpenCHAMI",
+        problem="test",
+        repos=[RepoSpec(name="ref", path=Path("/tmp/ref"), read_only=True)],
+    )
+
+    with pytest.raises(ValueError, match="writable repo"):
+        select_execution_agent_class(cfg)
 
 
 def test_select_execution_agent_class_respects_explicit_value() -> None:
@@ -188,3 +224,163 @@ def test_summarize_token_events_aggregates_by_stage() -> None:
         "total_tokens": 56,
     }
     assert summary["repair"]["count"] == 1
+
+
+def test_run_trace_round_trip_preserves_event_structure() -> None:
+    trace = RunTrace(
+        planning_mode="hierarchical",
+        events=[
+            RunTraceEvent(
+                stage="execution",
+                event_type="step_completed",
+                status="completed",
+                title="Update service config",
+                detail="Applied the config fix.",
+                main_step=2,
+                total_main_steps=4,
+                sub_step=1,
+                total_sub_steps=2,
+                affected_repos=["svc"],
+                token_usage={"input_tokens": 120, "output_tokens": 30, "total_tokens": 150},
+                metadata={"summary": "Applied the config fix."},
+            )
+        ],
+    )
+
+    restored = RunTrace.from_payload(trace.to_payload())
+
+    assert restored == trace
+
+
+def test_maybe_refresh_hierarchical_subplans_clears_pending_entries_from_partial_success() -> None:
+    refreshed, reasons = _maybe_refresh_hierarchical_subplans(
+        {
+            "main_next_index": 1,
+            "subplans": {"0": {"steps": []}, "1": {"steps": []}, "2": {"steps": []}},
+        },
+        total_main_steps=3,
+        partial_success={"resume_replan_scope": "pending"},
+        operator_feedback_text="",
+    )
+
+    assert reasons == ["partial-success artifact recommends refreshing pending subplans"]
+    assert refreshed["subplans"] == {"0": {"steps": []}}
+
+
+def test_maybe_refresh_hierarchical_subplans_refreshes_only_current_subplan_when_requested() -> None:
+    refreshed, reasons = _maybe_refresh_hierarchical_subplans(
+        {
+            "main_next_index": 1,
+            "subplans": {"0": {"steps": []}, "1": {"steps": []}, "2": {"steps": []}},
+        },
+        total_main_steps=4,
+        partial_success={"resume_replan_scope": "current"},
+        operator_feedback_text="",
+    )
+
+    assert reasons == ["partial-success artifact recommends refreshing the current subplan"]
+    assert refreshed["subplans"] == {"0": {"steps": []}, "2": {"steps": []}}
+
+
+def test_maybe_refresh_hierarchical_subplans_respects_operator_feedback_request() -> None:
+    refreshed, reasons = _maybe_refresh_hierarchical_subplans(
+        {
+            "main_next_index": 2,
+            "subplans": {"0": {"steps": []}, "1": {"steps": []}, "2": {"steps": []}},
+        },
+        total_main_steps=4,
+        partial_success={},
+        operator_feedback_text="# Marvin Operator Feedback\nrefresh_subplans: current\n",
+    )
+
+    assert reasons == ["operator feedback requested current-subplan refresh"]
+    assert refreshed["subplans"] == {"0": {"steps": []}, "1": {"steps": []}}
+
+
+def test_execute_plan_persists_structured_run_trace(tmp_path: Path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repo_path = workspace / "svc"
+    repo_path.mkdir()
+
+    cfg = AgentConfig(
+        project="OpenCHAMI",
+        problem="Update the service implementation.",
+        workspace=workspace,
+        repos=[RepoSpec(name="svc", path=repo_path)],
+        commit_each_step=False,
+    )
+
+    dummy_agent = SimpleNamespace(
+        telemetry=SimpleNamespace(llm=SimpleNamespace(samples=[])),
+        thread_id=None,
+    )
+    invoked_prompts: list[str] = []
+
+    (workspace / cfg.operator_feedback_markdown).parent.mkdir(parents=True, exist_ok=True)
+    (workspace / cfg.operator_feedback_markdown).write_text(
+        "# Marvin Operator Feedback\nrefresh_subplans: no\n\n## Notes For Next Repair Or Resume\n- Use the local svc fixtures before rerunning checks.\n",
+        encoding="utf-8",
+    )
+
+    @contextmanager
+    def no_heartbeat(*args, **kwargs):
+        yield lambda *a, **k: None
+
+    monkeypatch.setattr(
+        "openchami_coding_agent.execution.select_execution_agent_class",
+        lambda cfg: type("ExecutionAgent", (), {}),
+    )
+    monkeypatch.setattr(
+        "openchami_coding_agent.execution.instantiate_agent",
+        lambda *args, **kwargs: dummy_agent,
+    )
+    monkeypatch.setattr(
+        "openchami_coding_agent.execution.build_executor_prompt",
+        lambda *args, **kwargs: "base prompt",
+    )
+    monkeypatch.setattr(
+        "openchami_coding_agent.execution.invoke_agent",
+        lambda *args, **kwargs: (
+            invoked_prompts.append(args[1])
+            or InvocationCapture(content="Updated the service implementation.")
+        ),
+    )
+    monkeypatch.setattr("openchami_coding_agent.execution.hash_plan", lambda payload: "plan-123")
+    monkeypatch.setattr("openchami_coding_agent.execution.emit_panel", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "openchami_coding_agent.execution.render_check_status",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "openchami_coding_agent.execution.render_run_progress",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "openchami_coding_agent.execution.update_tracker_markdown",
+        lambda **kwargs: workspace / "plan" / "marvin.md",
+    )
+    monkeypatch.setattr("openchami_coding_agent.execution.progress_heartbeat", no_heartbeat)
+    monkeypatch.setattr(
+        "openchami_coding_agent.execution.snapshot_sqlite_db",
+        lambda *args, **kwargs: None,
+    )
+
+    payload = execute_plan(
+        cfg,
+        "1. Update the service implementation.",
+        executor_llm=object(),
+    )
+
+    trace = payload["run_trace"]
+    event_types = [event["event_type"] for event in trace["events"]]
+
+    assert trace["planning_mode"] == "single"
+    assert event_types == ["run_started", "step_completed", "run_completed"]
+    assert trace["events"][1]["title"] == "Update the service implementation"
+    assert invoked_prompts
+    assert "Operator feedback for this resume cycle:" in invoked_prompts[0]
+    assert "Use the local svc fixtures before rerunning checks." in invoked_prompts[0]
+
+    progress_payload = json.loads((workspace / cfg.executor_progress_json).read_text(encoding="utf-8"))
+    assert progress_payload["run_trace"]["events"][-1]["event_type"] == "run_completed"

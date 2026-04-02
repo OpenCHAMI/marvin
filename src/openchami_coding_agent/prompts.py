@@ -294,6 +294,74 @@ def build_planner_prompt(cfg: AgentConfig) -> str:
     return build_planner_prompt_from_prefix(prompt_prefix, cfg=cfg)
 
 
+def build_workspace_analysis_prompt_prefix(cfg: AgentConfig) -> str:
+    prompt = f"""
+You are {cfg.agent_name}, performing a post-run workspace analysis for Marvin.
+
+Persona guidance:
+- {cfg.persona_instruction}
+
+Analysis requirements:
+1. Inspect the supplied workspace evidence and identify the most likely reasons the prior run failed, stalled, or produced weak outcomes.
+2. Recommend YAML configuration updates that would improve the next run.
+3. Keep recommendations concrete and field-level whenever possible.
+4. Distinguish between confirmed evidence and uncertain assumptions.
+5. If important ambiguity remains, ask only the minimum clarification questions needed to improve the recommendation.
+6. Prefer the structured partial-success artifact, structured run trace, and any operator feedback over the narrative summary when they disagree.
+7. Structure the response with the exact section headings:
+   - Workspace Assessment
+   - Failure Signals
+   - Recommended YAML Updates
+   - Suggested YAML Snippet
+    - Suggested Operator Feedback
+   - Clarifications Needed
+8. Under Suggested YAML Snippet, emit a fenced `yaml` block containing only the fields that should be added or changed.
+9. Under Suggested Operator Feedback, emit a fenced `markdown` block containing the suggested contents or edits for `marvin_operator_feedback.md`; write `- none` if no operator-feedback change is needed.
+10. Under Clarifications Needed, write `- none` if no clarification is required.
+11. Treat this as a hierarchical analysis: start with the major issues, then the narrower YAML changes that follow from them.
+12. {_comment_preservation_instruction()}
+""".strip()
+    prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
+    return _append_instruction_section(
+        prompt,
+        "Planner-specific agent instructions",
+        cfg.planner_prompt_appendix,
+    )
+
+
+def build_workspace_analysis_prompt(
+    cfg: AgentConfig,
+    *,
+    workspace_evidence: str,
+    clarification_answers: str = "",
+) -> str:
+    workspace = str(cfg.workspace) if cfg.workspace else "<workspace-not-set>"
+    workdir = str(default_working_directory(cfg) or workspace)
+    clarifications = clarification_answers.strip() or "None yet."
+    prefix = build_workspace_analysis_prompt_prefix(cfg)
+    return f"""
+{prefix}
+
+Workspace analysis context:
+Project: {cfg.project}
+Workspace: {workspace}
+Default shell working directory: {workdir}
+Planning mode for this analysis: hierarchical
+
+Configured repositories:
+{repo_listing(cfg.repos)}
+
+Original task:
+{_clip_text(cfg.problem, _MAX_PROBLEM_CHARS * 2)}
+
+Clarification answers already provided:
+{clarifications}
+
+Workspace evidence:
+{workspace_evidence}
+""".strip()
+
+
 def build_executor_prompt(
     cfg: AgentConfig,
     plan_markdown: str,
@@ -335,17 +403,19 @@ Execution rules:
 1. Work in the listed repository paths only.
 2. Do not read, modify, or create files outside the workspace root path above.
 3. Use relative paths from the workspace whenever possible.
-4. Implement features in the plan order.
-5. Update tests and docs with each feature where appropriate.
-6. Summarize changes made, files touched, tests run, and anything left incomplete.
-7. If a step cannot be completed safely, stop and explain why.
-8. Keep plan tracking artifacts aligned with reality:
+4. Treat any repository marked `role=reference-only` as read-only context; do not edit it,
+   run write-oriented commands there, or commit from it.
+5. Implement features in the plan order.
+6. Update tests and docs with each feature where appropriate.
+7. Summarize changes made, files touched, tests run, and anything left incomplete.
+8. If a step cannot be completed safely, stop and explain why.
+9. Keep plan tracking artifacts aligned with reality:
     - `plan/marvin.md` is the source of truth for completed vs remaining work.
     - `plan/step-*.md` files each represent one executable step.
     - Reconcile actual execution progress against the plan after each major change.
-9. Treat the current step control block as authoritative;
+10. Treat the current step control block as authoritative;
     do not infer extra work from omitted plan details.
-10. {_comment_preservation_instruction()}
+11. {_comment_preservation_instruction()}
 """.strip()
     prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
     return _append_instruction_section(

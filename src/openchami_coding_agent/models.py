@@ -10,9 +10,15 @@ from .constants import (
     AGENT_NAME,
     AGENT_PERSONA_INSTRUCTION,
     DEFAULT_EXEC_PROGRESS_JSON,
+    DEFAULT_OPERATOR_FEEDBACK_MD,
     DEFAULT_PLAN_JSON,
+    DEFAULT_PARTIAL_SUCCESS_JSON,
     DEFAULT_PROPOSAL_MD,
+    DEFAULT_RECOMMENDED_CONFIG_YAML,
+    DEFAULT_RECOMMENDED_OPERATOR_FEEDBACK_MD,
     DEFAULT_SUMMARY_JSON,
+    DEFAULT_WORKSPACE_ANALYSIS_JSON,
+    DEFAULT_WORKSPACE_ANALYSIS_MD,
 )
 
 
@@ -28,6 +34,15 @@ class RepoSpec:
     description: str = ""
     brief: str = ""
     checks: list[str] = field(default_factory=list)
+    read_only: bool = False
+
+    @property
+    def execution_enabled(self) -> bool:
+        return not self.read_only
+
+    @property
+    def role_label(self) -> str:
+        return "reference-only" if self.read_only else "execution"
 
 
 @dataclass(frozen=True)
@@ -60,17 +75,126 @@ class StructuredPlan:
         }
 
 
+@dataclass(frozen=True)
+class RunTraceEvent:
+    stage: str
+    event_type: str
+    status: str = "info"
+    title: str = ""
+    detail: str = ""
+    main_step: int | None = None
+    total_main_steps: int | None = None
+    sub_step: int | None = None
+    total_sub_steps: int | None = None
+    repo: str | None = None
+    affected_repos: list[str] = field(default_factory=list)
+    token_usage: dict[str, int] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "stage": self.stage,
+            "event_type": self.event_type,
+            "status": self.status,
+            "title": self.title,
+            "detail": self.detail,
+            "affected_repos": list(self.affected_repos),
+            "token_usage": {key: int(value) for key, value in self.token_usage.items()},
+            "metadata": dict(self.metadata),
+        }
+        if self.main_step is not None:
+            payload["main_step"] = self.main_step
+        if self.total_main_steps is not None:
+            payload["total_main_steps"] = self.total_main_steps
+        if self.sub_step is not None:
+            payload["sub_step"] = self.sub_step
+        if self.total_sub_steps is not None:
+            payload["total_sub_steps"] = self.total_sub_steps
+        if self.repo is not None:
+            payload["repo"] = self.repo
+        return payload
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any] | None) -> RunTraceEvent:
+        source = payload if isinstance(payload, dict) else {}
+
+        def optional_int(key: str) -> int | None:
+            value = source.get(key)
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        raw_token_usage = source.get("token_usage")
+        token_usage = {
+            str(key): int(value or 0)
+            for key, value in (raw_token_usage.items() if isinstance(raw_token_usage, dict) else [])
+        }
+
+        return cls(
+            stage=str(source.get("stage") or "unknown"),
+            event_type=str(source.get("event_type") or "unknown"),
+            status=str(source.get("status") or "info"),
+            title=str(source.get("title") or ""),
+            detail=str(source.get("detail") or ""),
+            main_step=optional_int("main_step"),
+            total_main_steps=optional_int("total_main_steps"),
+            sub_step=optional_int("sub_step"),
+            total_sub_steps=optional_int("total_sub_steps"),
+            repo=(str(source.get("repo")) if source.get("repo") is not None else None),
+            affected_repos=[str(value) for value in (source.get("affected_repos") or [])],
+            token_usage=token_usage,
+            metadata=dict(source.get("metadata") or {}),
+        )
+
+
+@dataclass(frozen=True)
+class RunTrace:
+    planning_mode: str = "single"
+    events: list[RunTraceEvent] = field(default_factory=list)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "planning_mode": self.planning_mode,
+            "events": [event.to_payload() for event in self.events],
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any] | None) -> RunTrace:
+        source = payload if isinstance(payload, dict) else {}
+        raw_events = source.get("events")
+        events = (
+            [RunTraceEvent.from_payload(event) for event in raw_events]
+            if isinstance(raw_events, list)
+            else []
+        )
+        return cls(
+            planning_mode=str(source.get("planning_mode") or "single"),
+            events=events,
+        )
+
+
 @dataclass
 class AgentConfig:
     project: str
     problem: str
     mode: str = "plan_and_execute"
     planning_mode: str = "single"
+    config_path: Path | None = None
+    raw_config: dict[str, Any] = field(default_factory=dict)
     workspace: Path | None = None
     workspace_reused: bool = False
     proposal_markdown: str = DEFAULT_PROPOSAL_MD
     plan_json: str = DEFAULT_PLAN_JSON
     summary_json: str = DEFAULT_SUMMARY_JSON
+    partial_success_json: str = DEFAULT_PARTIAL_SUCCESS_JSON
+    operator_feedback_markdown: str = DEFAULT_OPERATOR_FEEDBACK_MD
+    workspace_analysis_markdown: str = DEFAULT_WORKSPACE_ANALYSIS_MD
+    workspace_analysis_json: str = DEFAULT_WORKSPACE_ANALYSIS_JSON
+    recommended_config_yaml: str = DEFAULT_RECOMMENDED_CONFIG_YAML
+    recommended_operator_feedback_markdown: str = DEFAULT_RECOMMENDED_OPERATOR_FEEDBACK_MD
     proposal_only: bool = False
     execute_after_plan: bool = True
     repos: list[RepoSpec] = field(default_factory=list)
@@ -103,6 +227,15 @@ class AgentConfig:
     repo_order: list[str] = field(default_factory=list)
     verbose_io: bool = False
     commit_each_step: bool = True
+    allow_user_prompts: bool = True
+
+    @property
+    def execution_repos(self) -> list[RepoSpec]:
+        return [repo for repo in self.repos if repo.execution_enabled]
+
+    @property
+    def reference_repos(self) -> list[RepoSpec]:
+        return [repo for repo in self.repos if repo.read_only]
 
     @staticmethod
     def _int_at_least(value: Any, default: int, minimum: int) -> int:
@@ -151,6 +284,25 @@ class AgentConfig:
             proposal_markdown=outputs.get("proposal_markdown", DEFAULT_PROPOSAL_MD),
             plan_json=outputs.get("plan_json", DEFAULT_PLAN_JSON),
             summary_json=outputs.get("summary_json", DEFAULT_SUMMARY_JSON),
+            partial_success_json=outputs.get(
+                "partial_success_json", DEFAULT_PARTIAL_SUCCESS_JSON
+            ),
+            operator_feedback_markdown=outputs.get(
+                "operator_feedback_markdown", DEFAULT_OPERATOR_FEEDBACK_MD
+            ),
+            workspace_analysis_markdown=outputs.get(
+                "workspace_analysis_markdown", DEFAULT_WORKSPACE_ANALYSIS_MD
+            ),
+            workspace_analysis_json=outputs.get(
+                "workspace_analysis_json", DEFAULT_WORKSPACE_ANALYSIS_JSON
+            ),
+            recommended_config_yaml=outputs.get(
+                "recommended_config_yaml", DEFAULT_RECOMMENDED_CONFIG_YAML
+            ),
+            recommended_operator_feedback_markdown=outputs.get(
+                "recommended_operator_feedback_markdown",
+                DEFAULT_RECOMMENDED_OPERATOR_FEEDBACK_MD,
+            ),
             proposal_only=bool(task.get("proposal_only", False)),
             execute_after_plan=bool(task.get("execute_after_plan", True)),
             repos=repos,

@@ -24,6 +24,11 @@ from .models import AgentConfig, ProgressSnapshot
 from .pipeline import run_pipeline_with_reporter
 from .progress_view import build_progress_display, repo_status_label, stage_label
 from .reporting import ProgressReporter
+from .summary_view import (
+    build_completion_summary_lines as _shared_build_completion_summary_lines,
+    token_hotspot_lines as _shared_token_hotspot_lines,
+    token_stage_report_lines as _shared_token_stage_report_lines,
+)
 from .utils import (
     build_token_cache_summary,
     format_cache_hit_ratio,
@@ -399,100 +404,20 @@ def load_summary_payload(workspace: Path | None, summary_json: str) -> dict[str,
 
 
 def token_stage_report_lines(payload: dict[str, Any]) -> list[str]:
-    raw = payload.get("token_usage_by_stage")
-    if not isinstance(raw, dict) or not raw:
-        return ["- Stage rollups will appear after the execution summary is written."]
-
-    ordered = [stage for stage in _TOKEN_STAGE_ORDER if stage in raw]
-    ordered.extend(stage for stage in sorted(raw) if stage not in ordered)
-
-    lines: list[str] = []
-    for stage in ordered:
-        values = raw.get(stage) or {}
-        if not isinstance(values, dict):
-            continue
-        cache_summary = build_token_cache_summary(values)
-        lines.append(
-            "- "
-            f"{stage_label(stage)}: calls={int(values.get('count', 0))} | "
-            f"prompt~{format_compact_count(int(values.get('prompt_estimated_tokens', 0)))} | "
-            f"tokens={_format_token_triplet(values)} | "
-            f"cache={format_cache_hit_ratio(cache_summary.get('cache_hit_ratio', 0.0))}"
-        )
-    return lines or ["- Stage rollups will appear after the execution summary is written."]
+    return _shared_token_stage_report_lines(payload)
 
 
 def token_hotspot_lines(payload: dict[str, Any], *, limit: int = 5) -> list[str]:
-    raw = payload.get("token_events")
-    if not isinstance(raw, list) or not raw:
-        return ["- Detailed token hotspots will appear after execution completes."]
-
-    events = [event for event in raw if isinstance(event, dict)]
-    if not events:
-        return ["- Detailed token hotspots will appear after execution completes."]
-
-    ranked = sorted(
-        events,
-        key=lambda event: (
-            int(event.get("total_tokens", 0) or 0),
-            int(event.get("prompt_estimated_tokens", 0) or 0),
-        ),
-        reverse=True,
-    )[: max(1, limit)]
-
-    lines: list[str] = []
-    for index, event in enumerate(ranked, start=1):
-        label = str(event.get("label") or "unnamed invocation")
-        stage = stage_label(str(event.get("stage") or "unknown"))
-        repo_name = str(event.get("repo") or "").strip()
-        repo_suffix = f" | repo={repo_name}" if repo_name else ""
-        cache_summary = build_token_cache_summary(event)
-        cache_suffix = ""
-        if int(cache_summary.get("input_tokens", 0) or 0) > 0:
-            cache_suffix = (
-                " | cache="
-                f"{format_cache_hit_ratio(cache_summary.get('cache_hit_ratio', 0.0))}"
-            )
-        lines.append(
-            f"{index}. {stage}: {label}{repo_suffix} | "
-            f"prompt~{format_compact_count(int(event.get('prompt_estimated_tokens', 0)))} | "
-            f"total={format_compact_count(int(event.get('total_tokens', 0)))}"
-            f"{cache_suffix}"
-        )
-    return lines
+    return _shared_token_hotspot_lines(payload, limit=limit)
 
 
 def build_completion_summary_text(workspace_name: str, payload: dict[str, Any]) -> str:
-    completed = payload.get("completed_repos") or []
-    failed = payload.get("failed_repos") or []
-    tokens = payload.get("token_usage") or {}
-    duration = payload.get("duration_sec")
-    summary = str(payload.get("summary") or "<no summary available>")
-    summary_tail = summary[-900:] if len(summary) > 900 else summary
-    cache_summary = payload.get("token_cache_summary") or build_token_cache_summary(tokens)
-
     return "\n".join(
-        [
-            _completion_personality_line(payload),
-            "",
-            f"Workspace: {workspace_name}",
-            f"Completed repos: {', '.join(completed) if completed else '-'}",
-            f"Failed repos: {', '.join(failed) if failed else '-'}",
-            f"Tokens {_token_triplet_label(tokens)}: {_format_token_triplet(tokens)}",
-            _cache_summary_text(cache_summary),
-            f"Duration: {format_elapsed_runtime(duration)}",
-            "",
-            "Token stage breakdown:",
-            *token_stage_report_lines(payload),
-            "",
-            "Highest-cost invocations:",
-            *token_hotspot_lines(payload, limit=5),
-            "",
-            "Summary tail (the useful part):",
-            summary_tail,
-            "",
-            "Press c to copy summary. Press Enter / Esc / q to close modal.",
-        ]
+        _shared_build_completion_summary_lines(
+            workspace_name,
+            payload,
+            personality_line=_completion_personality_line(payload),
+        )
     )
 
 

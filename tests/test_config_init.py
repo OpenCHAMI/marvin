@@ -5,6 +5,7 @@ import io
 import textwrap
 from pathlib import Path
 
+import pytest
 import yaml
 
 from openchami_coding_agent.cli import main
@@ -121,6 +122,150 @@ def test_cli_main_dispatches_init_command(monkeypatch) -> None:
     assert parsed.output == "task.yaml"
     assert parsed.force is True
     assert parsed.model == "openai:gpt-5.4"
+
+
+def test_cli_main_dispatches_analyze_workspace_command(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_workspace_analysis(args):
+        captured["args"] = args
+        return 23
+
+    monkeypatch.setattr(
+        "openchami_coding_agent.cli.run_workspace_analysis",
+        fake_run_workspace_analysis,
+    )
+
+    workspace = tmp_path / "run"
+    assert main(["analyze-workspace", str(workspace), "--model", "openai:gpt-5.4"]) == 23
+    parsed = captured["args"]
+    assert parsed.workspace == str(workspace)
+    assert parsed.model == "openai:gpt-5.4"
+
+
+def test_run_workspace_analysis_builds_config_without_yaml(monkeypatch, tmp_path: Path) -> None:
+    from openchami_coding_agent.cli import run_workspace_analysis
+    from openchami_coding_agent.models import AgentConfig
+
+    captured: dict[str, object] = {}
+
+    def fake_build_workspace_analysis_config(workspace_path, *, config_path=None, model_name=""):
+        captured["workspace"] = workspace_path
+        captured["config_path"] = config_path
+        captured["model_name"] = model_name
+        return AgentConfig(
+            project="OpenCHAMI",
+            problem="inspect",
+            mode="analyze_workspace",
+            workspace=tmp_path / "run",
+        )
+
+    def fake_run_pipeline_with_reporter(cfg, reporter):
+        del reporter
+        captured["allow_user_prompts"] = cfg.allow_user_prompts
+        captured["verbose_io"] = cfg.verbose_io
+        return 0
+
+    monkeypatch.setattr(
+        "openchami_coding_agent.cli.build_workspace_analysis_config",
+        fake_build_workspace_analysis_config,
+    )
+    monkeypatch.setattr(
+        "openchami_coding_agent.cli.run_pipeline_with_reporter",
+        fake_run_pipeline_with_reporter,
+    )
+
+    args = argparse.Namespace(
+        workspace=str(tmp_path / "run"),
+        config=None,
+        model="openai:gpt-5.4",
+        non_interactive=True,
+        verbose_io=True,
+    )
+
+    assert run_workspace_analysis(args) == 0
+    assert captured["config_path"] is None
+    assert captured["model_name"] == "openai:gpt-5.4"
+    assert captured["allow_user_prompts"] is False
+    assert captured["verbose_io"] is True
+
+
+def test_run_with_config_requires_existing_workspace_for_analysis_mode(monkeypatch, tmp_path: Path) -> None:
+    from openchami_coding_agent.cli import run_with_config
+
+    config_path = tmp_path / "task.yaml"
+    config_path.write_text("project: OpenCHAMI\nproblem: inspect\nmode: analyze_workspace\n", encoding="utf-8")
+
+    args = argparse.Namespace(
+        config=str(config_path),
+        workspace=None,
+        resume=False,
+        non_interactive=False,
+        confirm_before_execute=False,
+        resume_from=None,
+        planning_mode=None,
+        no_resume_state=False,
+        verbose_io=False,
+        tui=False,
+    )
+
+    with pytest.raises(ValueError, match="requires an existing workspace"):
+        run_with_config(args)
+
+
+def test_run_with_config_disables_clarification_prompts_in_non_interactive_analysis(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from openchami_coding_agent.cli import run_with_config
+    from openchami_coding_agent.models import AgentConfig
+
+    config_path = tmp_path / "task.yaml"
+    config_path.write_text(
+        "project: OpenCHAMI\nproblem: inspect\nmode: analyze_workspace\nworkspace: old-run\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_parse_config(config_path_arg, cli_workspace=None, resume=False):
+        captured["resume"] = resume
+        return AgentConfig(
+            project="OpenCHAMI",
+            problem="inspect",
+            mode="analyze_workspace",
+            workspace=tmp_path / "old-run",
+        )
+
+    def fake_run_pipeline_with_reporter(cfg, reporter):
+        del reporter
+        captured["allow_user_prompts"] = cfg.allow_user_prompts
+        return 0
+
+    monkeypatch.setattr(
+        "openchami_coding_agent.cli.parse_config",
+        fake_parse_config,
+    )
+    monkeypatch.setattr(
+        "openchami_coding_agent.cli.run_pipeline_with_reporter",
+        fake_run_pipeline_with_reporter,
+    )
+
+    args = argparse.Namespace(
+        config=str(config_path),
+        workspace=None,
+        resume=False,
+        non_interactive=True,
+        confirm_before_execute=False,
+        resume_from=None,
+        planning_mode=None,
+        no_resume_state=False,
+        verbose_io=False,
+        tui=False,
+    )
+
+    assert run_with_config(args) == 0
+    assert captured["resume"] is True
+    assert captured["allow_user_prompts"] is False
 
 
 def test_auto_config_spec_from_source_infers_project_and_repo(tmp_path: Path) -> None:

@@ -93,6 +93,31 @@ Resume an existing workspace from a checkpoint:
 uv run marvin tokensmith-amsc-task.yaml --workspace ./tokensmith-run --resume --resume-from executor_checkpoint_5.db
 ```
 
+Analyze a previously used workspace and get YAML recommendations from an existing analysis-mode task YAML:
+
+```bash
+uv run marvin path/to/task.yaml --workspace ./tokensmith-run --resume
+```
+
+Set `mode: analyze_workspace` in the YAML when you want Marvin to inspect an existing workspace instead of planning or executing code. In that mode Marvin uses the planner agent in hierarchical mode, reviews prior artifacts, asks clarification questions when needed unless `--non-interactive` is set, and writes separate workspace-analysis artifacts.
+
+When available, workspace analysis now also reads Marvin's structured run trace and partial-success artifact, so failed or incomplete runs carry forward more than a single narrative summary.
+
+If you do not want to write a second YAML just to investigate a previous run, use the direct CLI command instead:
+
+```bash
+uv run marvin analyze-workspace ./tokensmith-run
+```
+
+Optional flags for direct workspace analysis:
+
+- `--config path/to/task.yaml` to provide the original task config explicitly.
+- `--model openai:gpt-5.4` to choose the planner model used for analysis.
+- `--non-interactive` to suppress clarification prompts.
+- `--verbose-io` to expose underlying planner stdout/stderr.
+
+When possible, Marvin reconstructs the original task settings from a source-config snapshot stored in the workspace. If that snapshot is missing, it falls back to a synthesized minimal config built from the workspace artifacts and discovered repos, which is less elegant but still preferable to requiring fresh YAML busywork.
+
 ## Core Concepts
 
 ### Workspace Containment
@@ -110,6 +135,17 @@ Marvin supports two planning modes:
 
 Hierarchical mode produces better execution feedback and more precise resume points. It also spends more planner tokens, because naturally nuance is not free.
 
+### Invocation Modes
+
+Marvin supports these top-level `mode` values:
+
+- `plan`: generate the proposal and plan artifacts, then stop.
+- `execute`: execute against an existing proposal in the workspace.
+- `plan_and_execute`: plan first, then execute.
+- `analyze_workspace`: inspect an existing workspace, identify likely failure causes, and recommend YAML updates for the next run.
+
+`analyze_workspace` requires an existing workspace path via `--workspace`, `workspace`, or `restart_workspace`. It does not materialize repos or execute code. It reads prior artifacts, repository state, and tracker data, then writes a markdown report plus JSON analysis payload.
+
 ### Artifacts
 
 Marvin writes and updates these artifacts in the workspace:
@@ -120,6 +156,11 @@ Marvin writes and updates these artifacts in the workspace:
 - `artifacts/marvin_plan.json`: structured plan payload and planner metadata.
 - `artifacts/marvin_executor_progress.json`: persisted execution state for resume.
 - `artifacts/marvin_execution_summary.json`: final execution summary, including token rollups.
+- `artifacts/marvin_partial_success.json`: structured learning artifact derived from the run trace, including completed steps, unresolved blockers, and suggested operator feedback for the next run.
+- `artifacts/marvin_workspace_analysis.md`: workspace-analysis report for `mode: analyze_workspace`.
+- `artifacts/marvin_workspace_analysis.json`: machine-readable workspace-analysis payload.
+- `artifacts/marvin_recommended_config.yaml`: merged recommended config produced from the analysis YAML patch.
+- `artifacts/marvin_source_config.yaml`: snapshot of the original task config used to improve future workspace analysis.
 - `checkpoints/*.db`: executor and planner checkpoint snapshots.
 
 ## Running Marvin
@@ -135,6 +176,7 @@ Useful run flags:
 - `--tui` to use the Textual dashboard.
 - `--workspace <path>` to reuse or create a specific workspace.
 - `--resume` to require that the supplied workspace already exists.
+- `--non-interactive` to disable the execution confirmation prompt for that run.
 - `--resume-from <checkpoint>` to restore executor state from a specific snapshot.
 - `--planning-mode single|hierarchical` to override the YAML value for one run.
 - `--confirm-before-execute` to require confirmation before execution starts.
@@ -183,6 +225,7 @@ Auto-generation behavior:
 
 Generated configs currently default to:
 
+- `mode: plan_and_execute`
 - `repos[].checkout: true`
 - `execution.commit_each_step: true`
 - `task.confirm_before_execute: true`
@@ -231,6 +274,13 @@ repos:
 		description: Boot service repository
 		checks:
 			- go test ./...
+	- name: fabrica
+		url: https://github.com/OpenCHAMI/fabrica.git
+		branch: main
+		checkout: true
+		read_only: true
+		language: generic
+		description: Reference-only Fabrica repository for generator workflow and source model context
 
 execution:
 	executor_agent: auto
@@ -261,17 +311,55 @@ agent:
 		Explain the root cause before patching.
 ```
 
+Workspace fields:
+
+- `workspace`: explicit workspace path under the launch directory.
+- `workspace_root`: base directory used when Marvin auto-generates a new workspace name. Defaults to `.`.
+- `restart_workspace`: accepted alias for `workspace` during workspace resolution.
+
+Marvin still enforces workspace containment. If a configured workspace escapes the launch directory, it refuses to proceed rather than wandering off to vandalize whatever happened to be nearby.
+
 Important fields:
 
 - `project`: human-readable task name.
 - `problem`: the actual work Marvin is supposed to solve.
+- `mode`: top-level run mode such as `plan`, `execute`, or `plan_and_execute`.
+- `mode: analyze_workspace`: inspect a prior workspace and recommend YAML changes instead of executing code.
 - `models.default|planner|executor`: planner and executor model selection.
 - `planning.mode`: `single` or `hierarchical`.
+- `workspace|workspace_root|restart_workspace`: workspace selection and auto-generation controls.
 - `repos[]`: repository definitions, checkout behavior, and validation commands.
+- `repos[].read_only` or `repos[].read-only`: marks a repository as reference-only context instead of an execution target.
 - `task.*`: execution gating, plan requirements, deliverables, and notes.
 - `execution.*`: runtime behavior such as retries, repo ordering, and step commits.
 - `outputs.*`: artifact paths within the workspace.
+- `outputs.workspace_analysis_markdown|workspace_analysis_json`: analysis artifact paths used by `mode: analyze_workspace`.
+- `outputs.recommended_config_yaml`: full merged config artifact written by `mode: analyze_workspace`.
 - `agent.*`: prompt customization and persona controls.
+
+### Reference Repositories
+
+Some tasks need additional repositories for context but should never edit them. Mark those repositories with `read_only: true` or `read-only: true`:
+
+```yaml
+repos:
+	- name: service
+		url: https://github.com/OpenCHAMI/example-service.git
+		checkout: true
+	- name: shared-docs
+		url: https://github.com/OpenCHAMI/docs.git
+		checkout: true
+		read_only: true
+```
+
+Reference-only repositories are:
+
+- materialized into the workspace so the planner and executor can inspect them.
+- included in prompt context and labeled as `role=reference-only`.
+- excluded from writable execution-repo selection, validation targeting, and step commits.
+- treated as read-only context by the execution prompt.
+
+In other words, Marvin can read them, cite them, and glower at them, but it should not modify them.
 
 ## Agent Customization
 
@@ -288,6 +376,7 @@ Field behavior:
 - `agent.*_path` variants load appendix text from files relative to the YAML config.
 - `repos[].brief` adds cached repository context to planner, executor, and repair prompts.
 - `repos[].brief_path` loads that brief from a file relative to the YAML config.
+- `repos[].read_only` or `repos[].read-only` marks a repository as reference-only context. In prompts this appears as `role=reference-only`.
 - `execution.executor_agent` selects the URSA execution agent implementation.
 - `execution.commit_each_step` controls whether Marvin tries to create a git commit after each completed step.
 

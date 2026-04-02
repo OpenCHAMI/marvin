@@ -10,6 +10,8 @@ from openchami_coding_agent.prompts import (
     build_planner_prompt_prefix,
     build_repo_fix_control_suffix,
     build_repo_fix_prompt_prefix,
+    build_workspace_analysis_prompt,
+    build_workspace_analysis_prompt_prefix,
     build_subplanner_control_suffix,
     build_subplanner_prompt_from_prefix,
     build_subplanner_prompt_prefix,
@@ -131,3 +133,51 @@ def test_build_executor_prompt_includes_comment_preservation_rule() -> None:
 
     assert "Preserve useful existing comments." in prompt
     assert "accurate and relevant to the code they describe" in prompt
+
+
+def test_build_executor_prompt_labels_reference_repos_as_read_only() -> None:
+    cfg = AgentConfig(
+        project="OpenCHAMI",
+        problem="Implement cache-aware prompt shaping.",
+        workspace=Path("/tmp/marvin-ws"),
+        repos=[
+            RepoSpec(name="svc", path=Path("/tmp/marvin-ws/repos/svc")),
+            RepoSpec(
+                name="docs",
+                path=Path("/tmp/marvin-ws/repos/docs"),
+                read_only=True,
+            ),
+        ],
+    )
+
+    prompt = build_executor_prompt(cfg, "1. Inspect")
+
+    assert "role=reference-only" in prompt
+    assert "read-only context; do not edit it" in prompt
+
+
+def test_build_workspace_analysis_prompt_prefix_declares_expected_sections() -> None:
+    cfg = _cfg()
+
+    prompt = build_workspace_analysis_prompt_prefix(cfg)
+
+    assert "Workspace Assessment" in prompt
+    assert "Recommended YAML Updates" in prompt
+    assert "Suggested YAML Snippet" in prompt
+    assert "Suggested Operator Feedback" in prompt
+    assert "Clarifications Needed" in prompt
+    assert "hierarchical analysis" in prompt
+
+
+def test_build_workspace_analysis_prompt_includes_evidence_and_answers() -> None:
+    cfg = _cfg()
+
+    prompt = build_workspace_analysis_prompt(
+        cfg,
+        workspace_evidence="summary: checks failed",
+        clarification_answers="- Which repo failed?: boot-service",
+    )
+
+    assert "summary: checks failed" in prompt
+    assert "Which repo failed?: boot-service" in prompt
+    assert "Planning mode for this analysis: hierarchical" in prompt

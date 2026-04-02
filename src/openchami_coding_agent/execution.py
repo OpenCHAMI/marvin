@@ -12,7 +12,14 @@ from typing import Any
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .checkpoints import checkpoint_dir, list_executor_checkpoints, parse_snapshot_indices
-from .models import AgentConfig, CheckExecutionResult, PlanStep, RepoSpec
+from .models import (
+    AgentConfig,
+    CheckExecutionResult,
+    PlanStep,
+    RepoSpec,
+    RunTrace,
+    RunTraceEvent,
+)
 from .plan_tracking import (
     compress_structured_plan,
     extract_plan_steps,
@@ -31,6 +38,12 @@ from .prompts import (
     build_subplanner_prompt_prefix,
 )
 from .reporting import emit_panel, progress_heartbeat, render_check_status, render_run_progress
+from .summary_view import (
+    build_partial_success_learning_lines,
+    build_partial_success_payload,
+    extract_operator_feedback_notes,
+    operator_feedback_requested_replan_scope,
+)
 from .ursa_compat import get_agent_class, hash_plan, instantiate_agent, snapshot_sqlite_db
 from .utils import (
     build_token_cache_summary,
@@ -118,7 +131,7 @@ def commit_step_changes(
 
     commit_message = _commit_message_for_step(step_index, total_steps, step_text)
     committed_repos: list[str] = []
-    for repo in cfg.repos:
+    for repo in cfg.execution_repos:
         if not _is_git_repo(repo.path):
             continue
         if not _repo_has_changes(repo.path):
@@ -315,7 +328,8 @@ def topological_order(
 
 
 def resolve_repo_execution_order(cfg: AgentConfig, plan_markdown: str) -> list[RepoSpec]:
-    repo_names = [repo.name for repo in cfg.repos]
+    execution_repos = cfg.execution_repos
+    repo_names = [repo.name for repo in execution_repos]
     if len(set(repo_names)) != len(repo_names):
         raise ValueError("Repository names must be unique.")
 
@@ -334,7 +348,7 @@ def resolve_repo_execution_order(cfg: AgentConfig, plan_markdown: str) -> list[R
             preferred.append(name)
 
     sorted_names = topological_order(repo_names, cfg.repo_dependencies, preferred)
-    by_name = {repo.name: repo for repo in cfg.repos}
+    by_name = {repo.name: repo for repo in execution_repos}
     return [by_name[name] for name in sorted_names]
 
 
@@ -399,6 +413,13 @@ def format_repo_check_failures(result: CheckExecutionResult) -> str:
 
 
 def select_execution_agent_class(cfg: AgentConfig) -> type[Any]:
+    execution_repos = cfg.execution_repos
+    if not execution_repos:
+        raise ValueError(
+            "Execution requires at least one writable repo. Mark reference-only repos "
+            "with repos[].read-only: true alongside at least one execution repo."
+        )
+
     execution_agent = get_agent_class("ExecutionAgent")
     gitgo_agent: type[Any] | None = None
     try:
@@ -411,8 +432,8 @@ def select_execution_agent_class(cfg: AgentConfig) -> type[Any]:
 
     if requested in {"", "auto", "default"}:
         if (
-            len(cfg.repos) == 1
-            and cfg.repos[0].language.lower() == "go"
+            len(execution_repos) == 1
+            and execution_repos[0].language.lower() == "go"
             and gitgo_agent is not None
         ):
             return gitgo_agent
@@ -502,6 +523,51 @@ def summarize_token_events(events: list[dict[str, Any]]) -> dict[str, dict[str, 
     return summary
 
 
+def _record_run_trace_event(
+    events: list[dict[str, Any]],
+    *,
+    stage: str,
+    event_type: str,
+    status: str = "info",
+    title: str = "",
+    detail: str = "",
+    main_step: int | None = None,
+    total_main_steps: int | None = None,
+    sub_step: int | None = None,
+    total_sub_steps: int | None = None,
+    repo: str | None = None,
+    affected_repos: list[str] | None = None,
+    token_usage: dict[str, int] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    events.append(
+        RunTraceEvent(
+            stage=stage,
+            event_type=event_type,
+            status=status,
+            title=title,
+            detail=detail,
+            main_step=main_step,
+            total_main_steps=total_main_steps,
+            sub_step=sub_step,
+            total_sub_steps=total_sub_steps,
+            repo=repo,
+            affected_repos=list(affected_repos or []),
+            token_usage={
+                key: int(value or 0) for key, value in (token_usage or {}).items()
+            },
+            metadata=dict(metadata or {}),
+        ).to_payload()
+    )
+
+
+def _serialize_run_trace(planning_mode: str, events: list[dict[str, Any]]) -> dict[str, Any]:
+    return RunTrace(
+        planning_mode=planning_mode,
+        events=[RunTraceEvent.from_payload(event) for event in events],
+    ).to_payload()
+
+
 def _materialize_plan_steps(
     plan_steps: list[str],
     structured_plan: list[PlanStep] | None,
@@ -525,6 +591,56 @@ def _load_hierarchical_progress(progress: dict[str, Any], plan_hash: str) -> dic
         "main_next_index": max(0, int(progress.get("main_next_index", 0) or 0)),
         "subplans": dict(subplans),
     }
+
+
+def _maybe_refresh_hierarchical_subplans(
+    hierarchical_progress: dict[str, Any],
+    *,
+    total_main_steps: int,
+    partial_success: dict[str, Any] | None,
+    operator_feedback_text: str,
+) -> tuple[dict[str, Any], list[str]]:
+    next_index = max(0, int(hierarchical_progress.get("main_next_index", 0) or 0))
+    if next_index >= total_main_steps:
+        return hierarchical_progress, []
+
+    requested_scope = "none"
+    reasons: list[str] = []
+    if isinstance(partial_success, dict):
+        partial_scope = str(partial_success.get("resume_replan_scope") or "none")
+        if partial_scope == "current":
+            requested_scope = "current"
+            reasons.append("partial-success artifact recommends refreshing the current subplan")
+        elif partial_scope == "pending":
+            requested_scope = "pending"
+            reasons.append("partial-success artifact recommends refreshing pending subplans")
+    operator_scope = operator_feedback_requested_replan_scope(operator_feedback_text)
+    if operator_scope == "current":
+        if requested_scope == "none":
+            requested_scope = "current"
+        reasons.append("operator feedback requested current-subplan refresh")
+    elif operator_scope == "pending":
+        requested_scope = "pending"
+        reasons.append("operator feedback requested pending-subplan refresh")
+    if requested_scope == "none":
+        return hierarchical_progress, []
+
+    if requested_scope == "current":
+        refreshed_subplans = {
+            key: value
+            for key, value in dict(hierarchical_progress.get("subplans") or {}).items()
+            if int(key) != next_index
+        }
+    else:
+        refreshed_subplans = {
+            key: value
+            for key, value in dict(hierarchical_progress.get("subplans") or {}).items()
+            if int(key) < next_index
+        }
+    return {
+        "main_next_index": next_index,
+        "subplans": refreshed_subplans,
+    }, reasons
 
 
 def _subplan_entry_steps(entry: dict[str, Any]) -> list[PlanStep]:
@@ -555,6 +671,7 @@ def _generate_subplan(
     total_main_steps: int,
     token_usage: dict[str, int],
     token_events: list[dict[str, Any]],
+    run_trace_events: list[dict[str, Any]],
     verbose_io: bool,
     started: float,
 ) -> tuple[list[PlanStep], dict[str, int]]:
@@ -628,6 +745,23 @@ def _generate_subplan(
         delta=subplan_delta,
         main_step=main_step_index,
     )
+    _record_run_trace_event(
+        run_trace_events,
+        stage="subplanning",
+        event_type="subplan_generated",
+        status="completed",
+        title=main_step.name,
+        detail=f"Generated {len(substeps)} sub-step(s) for main step {main_step_index}.",
+        main_step=main_step_index,
+        total_main_steps=total_main_steps,
+        token_usage=subplan_delta,
+        metadata={
+            "main_step": main_step.to_payload(),
+            "sub_steps": [step.to_payload() for step in substeps],
+            "original_sub_step_count": len(normalized.steps),
+            "compressed": len(substeps) < len(normalized.steps),
+        },
+    )
     return substeps, merge_tokens(token_usage, subplan_delta)
 
 
@@ -641,8 +775,10 @@ def _build_progress_payload(
     completed_repos: list[str],
     failed_repos: list[str],
     hierarchical_progress: dict[str, Any] | None = None,
+    run_trace_events: list[dict[str, Any]] | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    run_trace_payload = _serialize_run_trace(cfg.planning_mode, run_trace_events or [])
     payload: dict[str, Any] = {
         "plan_hash": plan_sig,
         "planning_mode": cfg.planning_mode,
@@ -650,7 +786,9 @@ def _build_progress_payload(
         "completed_repos": completed_repos,
         "failed_repos": failed_repos,
         "token_usage": token_usage,
+        "run_trace": run_trace_payload,
     }
+    payload["partial_success"] = build_partial_success_payload(payload)
     if cfg.planning_mode == "hierarchical":
         payload["main_next_index"] = next_step_index
         payload["subplans"] = dict((hierarchical_progress or {}).get("subplans") or {})
@@ -672,6 +810,15 @@ def execute_plan(
     workspace = cfg.workspace
     if workspace is None:
         raise RuntimeError("Workspace must be set before execution.")
+    execution_repos = cfg.execution_repos
+    execution_repo_count = len(execution_repos)
+    operator_feedback_path = (workspace / cfg.operator_feedback_markdown).resolve()
+    operator_feedback_text = (
+        operator_feedback_path.read_text(encoding="utf-8")
+        if operator_feedback_path.exists() and operator_feedback_path.is_file()
+        else ""
+    )
+    operator_feedback_notes = extract_operator_feedback_notes(operator_feedback_text)
 
     started = time.time()
     executor_db = checkpoint_dir(workspace) / "executor_checkpoint.db"
@@ -700,9 +847,38 @@ def execute_plan(
     progress = load_exec_progress(workspace, cfg.executor_progress_json)
     plan_hash_matches = progress.get("plan_hash") == plan_sig
     hierarchical_progress = _initial_hierarchical_progress()
+    token_events: list[dict[str, Any]] = []
+    run_trace_events: list[dict[str, Any]] = []
+    if cfg.resume_execution_state and plan_hash_matches and isinstance(progress.get("run_trace"), dict):
+        restored_trace = RunTrace.from_payload(progress.get("run_trace"))
+        run_trace_events = [event.to_payload() for event in restored_trace.events]
     if cfg.planning_mode == "hierarchical" and cfg.resume_execution_state and plan_hash_matches:
         hierarchical_progress = _load_hierarchical_progress(progress, plan_sig)
         next_step_index = int(hierarchical_progress.get("main_next_index", 0) or 0)
+        hierarchical_progress, refresh_reasons = _maybe_refresh_hierarchical_subplans(
+            hierarchical_progress,
+            total_main_steps=len(materialized_steps),
+            partial_success=(progress.get("partial_success") if isinstance(progress.get("partial_success"), dict) else None),
+            operator_feedback_text=operator_feedback_text,
+        )
+        if refresh_reasons:
+            emit_panel(
+                "Refreshing pending hierarchical subplans on resume:\n- "
+                + "\n- ".join(refresh_reasons),
+                border_style="yellow",
+            )
+            next_step_index = int(hierarchical_progress.get("main_next_index", 0) or 0)
+            _record_run_trace_event(
+                run_trace_events,
+                stage="planning",
+                event_type="subplans_refreshed_on_resume",
+                status="completed",
+                title="Pending subplans refreshed",
+                detail="; ".join(refresh_reasons),
+                main_step=next_step_index + 1 if materialized_steps else None,
+                total_main_steps=len(materialized_steps),
+                metadata={"reasons": refresh_reasons},
+            )
     else:
         next_step_index = (
             normalize_next_step_index(progress.get("next_index"), len(plan_steps))
@@ -731,12 +907,16 @@ def execute_plan(
             border_style="blue",
         )
 
-    token_events: list[dict[str, Any]] = []
     base_executor_prompt = build_executor_prompt(
         cfg,
         plan_markdown,
         structured_plan=materialized_steps,
     )
+    if operator_feedback_notes:
+        base_executor_prompt = (
+            f"{base_executor_prompt}\n\nOperator feedback for this resume cycle:\n"
+            f"{operator_feedback_notes}"
+        )
     planner_conn: sqlite3.Connection | None = None
     planner: Any | None = None
 
@@ -753,6 +933,25 @@ def execute_plan(
             metrics_dir="ursa_metrics",
             thread_id=f"{thread_id}::detail",
             workspace=str(workspace),
+        )
+
+    if not run_trace_events:
+        _record_run_trace_event(
+            run_trace_events,
+            stage="execution",
+            event_type="run_started",
+            status="in_progress",
+            title="Execution started",
+            detail=(
+                f"Using {execution_agent_class.__name__} with {cfg.planning_mode} planning "
+                f"across {execution_repo_count} writable repo(s)."
+            ),
+            affected_repos=[repo.name for repo in execution_repos],
+            metadata={
+                "execution_agent": execution_agent_class.__name__,
+                "planning_mode": cfg.planning_mode,
+                "execution_repos": [repo.name for repo in execution_repos],
+            },
         )
 
     if plan_steps and cfg.planning_mode == "hierarchical":
@@ -786,6 +985,7 @@ def execute_plan(
                     total_main_steps=len(materialized_steps),
                     token_usage=token_usage,
                     token_events=token_events,
+                    run_trace_events=run_trace_events,
                     verbose_io=cfg.verbose_io,
                     started=started,
                 )
@@ -872,7 +1072,7 @@ def execute_plan(
                     current_sub_total=len(sub_steps),
                     detail_provider=step_execution_detail_provider,
                     token_usage_provider=step_token_usage_provider,
-                    total_repos_provider=lambda: len(cfg.repos),
+                    total_repos_provider=lambda: execution_repo_count,
                     start_time=started,
                     interval_sec=2.0,
                 ) as emit_progress_update:
@@ -925,6 +1125,26 @@ def execute_plan(
                     main_step=main_index + 1,
                     sub_step=sub_index + 1,
                 )
+                _record_run_trace_event(
+                    run_trace_events,
+                    stage="execution",
+                    event_type="step_completed",
+                    status="completed",
+                    title=sub_step.name,
+                    detail=step_status,
+                    main_step=main_index + 1,
+                    total_main_steps=len(materialized_steps),
+                    sub_step=sub_index + 1,
+                    total_sub_steps=len(sub_steps),
+                    affected_repos=committed_repos,
+                    token_usage=step_delta,
+                    metadata={
+                        "main_step_name": main_step.name,
+                        "step": sub_step.to_payload(),
+                        "committed_repos": committed_repos,
+                        "summary": step_summary,
+                    },
+                )
                 sub_entry["next_index"] = sub_index + 1
                 sub_entry["last_summary"] = step_summary
                 subplans[str(main_index)] = sub_entry
@@ -937,16 +1157,17 @@ def execute_plan(
                 save_exec_progress(
                     workspace,
                     cfg.executor_progress_json,
-                    {
-                        "plan_hash": plan_sig,
-                        "planning_mode": "hierarchical",
-                        "summary": summary,
-                        "main_next_index": main_index,
-                        "subplans": subplans,
-                        "completed_repos": sorted(progress.get("completed_repos") or []),
-                        "failed_repos": sorted(progress.get("failed_repos") or []),
-                        "token_usage": token_usage,
-                    },
+                    _build_progress_payload(
+                        cfg=cfg,
+                        plan_sig=plan_sig,
+                        summary=summary,
+                        next_step_index=main_index,
+                        token_usage=token_usage,
+                        completed_repos=sorted(progress.get("completed_repos") or []),
+                        failed_repos=sorted(progress.get("failed_repos") or []),
+                        hierarchical_progress=hierarchical_progress,
+                        run_trace_events=run_trace_events,
+                    ),
                 )
                 update_tracker_markdown(
                     workspace=workspace,
@@ -976,16 +1197,17 @@ def execute_plan(
             save_exec_progress(
                 workspace,
                 cfg.executor_progress_json,
-                {
-                    "plan_hash": plan_sig,
-                    "planning_mode": "hierarchical",
-                    "summary": summary,
-                    "main_next_index": next_step_index,
-                    "subplans": subplans,
-                    "completed_repos": sorted(progress.get("completed_repos") or []),
-                    "failed_repos": sorted(progress.get("failed_repos") or []),
-                    "token_usage": token_usage,
-                },
+                _build_progress_payload(
+                    cfg=cfg,
+                    plan_sig=plan_sig,
+                    summary=summary,
+                    next_step_index=next_step_index,
+                    token_usage=token_usage,
+                    completed_repos=sorted(progress.get("completed_repos") or []),
+                    failed_repos=sorted(progress.get("failed_repos") or []),
+                    hierarchical_progress=hierarchical_progress,
+                    run_trace_events=run_trace_events,
+                ),
             )
     elif plan_steps:
         for step_index in range(next_step_index, len(plan_steps)):
@@ -1040,7 +1262,7 @@ def execute_plan(
                 detail=execution_activity,
                 detail_provider=step_execution_detail_provider,
                 token_usage_provider=step_token_usage_provider,
-                total_repos_provider=lambda: len(cfg.repos),
+                total_repos_provider=lambda: execution_repo_count,
                 start_time=started,
                 interval_sec=2.0,
             ) as emit_progress_update:
@@ -1085,20 +1307,38 @@ def execute_plan(
                 delta=step_delta,
                 main_step=step_index + 1,
             )
+            _record_run_trace_event(
+                run_trace_events,
+                stage="execution",
+                event_type="step_completed",
+                status="completed",
+                title=step.name,
+                detail=step_status,
+                main_step=step_index + 1,
+                total_main_steps=len(plan_steps),
+                affected_repos=committed_repos,
+                token_usage=step_delta,
+                metadata={
+                    "step": step.to_payload(),
+                    "committed_repos": committed_repos,
+                    "summary": step_summary,
+                },
+            )
             next_step_index = step_index + 1
             _save_executor_snapshot(executor_db, workspace, main_step=step_index + 1)
             save_exec_progress(
                 workspace,
                 cfg.executor_progress_json,
-                {
-                    "plan_hash": plan_sig,
-                    "planning_mode": "single",
-                    "summary": summary,
-                    "next_index": next_step_index,
-                    "completed_repos": sorted(progress.get("completed_repos") or []),
-                    "failed_repos": sorted(progress.get("failed_repos") or []),
-                    "token_usage": token_usage,
-                },
+                _build_progress_payload(
+                    cfg=cfg,
+                    plan_sig=plan_sig,
+                    summary=summary,
+                    next_step_index=next_step_index,
+                    token_usage=token_usage,
+                    completed_repos=sorted(progress.get("completed_repos") or []),
+                    failed_repos=sorted(progress.get("failed_repos") or []),
+                    run_trace_events=run_trace_events,
+                ),
             )
             update_tracker_markdown(
                 workspace=workspace,
@@ -1123,7 +1363,7 @@ def execute_plan(
     else:
         execution_activity = (
             "No structured plan steps detected; applying executor actions "
-            f"across repo(s): {', '.join(repo.name for repo in cfg.repos) or '<none>'}."
+            f"across repo(s): {', '.join(repo.name for repo in execution_repos) or '<none>'}."
         )
         update_tracker_markdown(
             workspace=workspace,
@@ -1154,7 +1394,7 @@ def execute_plan(
                 token_usage,
                 token_delta(executor_baseline, extract_agent_tokens(executor)),
             ),
-            total_repos_provider=lambda: len(cfg.repos),
+            total_repos_provider=lambda: execution_repo_count,
             start_time=started,
             interval_sec=2.0,
         ) as emit_progress_update:
@@ -1191,18 +1431,29 @@ def execute_plan(
             prompt=base_executor_prompt,
             delta=fallback_delta,
         )
+        _record_run_trace_event(
+            run_trace_events,
+            stage="execution",
+            event_type="fallback_execution_completed",
+            status="completed",
+            title="Fallback execution pass",
+            detail=fallback_status,
+            token_usage=fallback_delta,
+            metadata={"summary": summary},
+        )
         save_exec_progress(
             workspace,
             cfg.executor_progress_json,
-            {
-                "plan_hash": plan_sig,
-                "planning_mode": cfg.planning_mode,
-                "summary": summary,
-                "next_index": 0,
-                "completed_repos": sorted(progress.get("completed_repos") or []),
-                "failed_repos": sorted(progress.get("failed_repos") or []),
-                "token_usage": token_usage,
-            },
+            _build_progress_payload(
+                cfg=cfg,
+                plan_sig=plan_sig,
+                summary=summary,
+                next_step_index=0,
+                token_usage=token_usage,
+                completed_repos=sorted(progress.get("completed_repos") or []),
+                failed_repos=sorted(progress.get("failed_repos") or []),
+                run_trace_events=run_trace_events,
+            ),
         )
 
     if planner_conn is not None:
@@ -1355,8 +1606,33 @@ def execute_plan(
                 completed_repos=sorted(completed_repos),
                 failed_repos=sorted(failed_repos),
                 hierarchical_progress=hierarchical_progress,
+                run_trace_events=run_trace_events,
                 extra={"last_check_attempt": attempt},
             ),
+        )
+        _record_run_trace_event(
+            run_trace_events,
+            stage="validation",
+            event_type="validation_attempt_completed",
+            status="completed" if not failed_map else "failed",
+            title=f"Validation attempt {attempt + 1}",
+            detail=(
+                f"{len(batch_results) - len(failed_map)} repo(s) passed and "
+                f"{len(failed_map)} repo(s) failed."
+            ),
+            affected_repos=sorted(batch_results),
+            metadata={
+                "attempt": attempt + 1,
+                "max_attempts": cfg.max_check_retries + 1,
+                "repo_results": {
+                    repo_name: {
+                        "checks_passed": result.checks_passed,
+                        "check_results": result.check_results,
+                    }
+                    for repo_name, result in batch_results.items()
+                },
+                "failed_repos": sorted(failed_map),
+            },
         )
         render_check_status(repo_status, repo_retries)
         update_tracker_markdown(
@@ -1396,11 +1672,34 @@ def execute_plan(
                 continue
             repo_retries[repo.name] = repo_retries.get(repo.name, 0) + 1
             executor_baseline = extract_agent_tokens(executor)
+            repair_learning_payload = build_partial_success_payload(
+                {
+                    "planning_mode": cfg.planning_mode,
+                    "completed_repos": sorted(completed_repos),
+                    "failed_repos": sorted(failed_repos),
+                    "run_trace": _serialize_run_trace(cfg.planning_mode, run_trace_events),
+                    "all_checks_passed": False,
+                }
+            )
+            repair_learning_lines = build_partial_success_learning_lines(
+                repair_learning_payload,
+                max_lines=4,
+            )
             fix_prompt = build_repo_fix_prompt_from_prefix(
                 repair_prompt_prefixes[repo.name],
                 failure_text=format_repo_check_failures(failed_map[repo.name]),
                 attempt=attempt + 1,
             )
+            if repair_learning_lines:
+                fix_prompt = (
+                    f"{fix_prompt}\n\nRun learning so far:\n"
+                    + "\n".join(f"- {line}" for line in repair_learning_lines)
+                )
+            if operator_feedback_notes:
+                fix_prompt = (
+                    f"{fix_prompt}\n\nOperator feedback for this repair cycle:\n"
+                    f"{operator_feedback_notes}"
+                )
             emit_panel(
                 (
                     f"Attempting automatic repair for repo '{repo.name}' "
@@ -1493,6 +1792,23 @@ def execute_plan(
                 delta=repair_delta,
                 repo_name=repo.name,
             )
+            _record_run_trace_event(
+                run_trace_events,
+                stage="repair",
+                event_type="repair_attempt_completed",
+                status="completed",
+                title=repo.name,
+                detail=fix_status,
+                repo=repo.name,
+                affected_repos=[repo.name],
+                token_usage=repair_delta,
+                metadata={
+                    "attempt": attempt + 1,
+                    "max_attempts": cfg.max_check_retries,
+                    "summary": fix_summary,
+                    "check_results": failed_map[repo.name].check_results,
+                },
+            )
             save_exec_progress(
                 workspace,
                 cfg.executor_progress_json,
@@ -1505,6 +1821,7 @@ def execute_plan(
                     completed_repos=sorted(completed_repos),
                     failed_repos=sorted(failed_repos),
                     hierarchical_progress=hierarchical_progress,
+                    run_trace_events=run_trace_events,
                     extra={"last_check_attempt": attempt},
                 ),
             )
@@ -1525,6 +1842,26 @@ def execute_plan(
 
     all_checks_passed = len(failed_repos) == 0
     duration_sec = round(time.time() - started, 2)
+    _record_run_trace_event(
+        run_trace_events,
+        stage="complete" if all_checks_passed else "failed",
+        event_type="run_completed",
+        status="completed" if all_checks_passed else "failed",
+        title="Execution finished",
+        detail=(
+            "All checks passed."
+            if all_checks_passed
+            else "Execution finished with unresolved check failures."
+        ),
+        affected_repos=sorted(completed_repos | failed_repos),
+        token_usage=token_usage,
+        metadata={
+            "duration_sec": duration_sec,
+            "completed_repos": sorted(completed_repos),
+            "failed_repos": sorted(failed_repos),
+            "all_checks_passed": all_checks_passed,
+        },
+    )
     save_exec_progress(
         workspace,
         cfg.executor_progress_json,
@@ -1537,6 +1874,7 @@ def execute_plan(
             completed_repos=sorted(completed_repos),
             failed_repos=sorted(failed_repos),
             hierarchical_progress=hierarchical_progress,
+            run_trace_events=run_trace_events,
             extra={
                 "all_checks_passed": all_checks_passed,
                 "duration_sec": duration_sec,
@@ -1604,7 +1942,9 @@ def execute_plan(
         "token_cache_summary": cache_summary,
         "token_events": token_events,
         "token_usage_by_stage": summarize_token_events(token_events),
+        "run_trace": _serialize_run_trace(cfg.planning_mode, run_trace_events),
         "duration_sec": duration_sec,
     }
+    payload["partial_success"] = build_partial_success_payload(payload)
     executor_conn.close()
     return payload

@@ -9,6 +9,8 @@ from typing import Any
 
 from .constants import (
     AGENT_NAME,
+    DEFAULT_SOURCE_CONFIG_YAML,
+    DEFAULT_SUMMARY_JSON,
     DEFAULT_WORKSPACE_ROOT,
 )
 from .models import AgentConfig, RepoSpec
@@ -184,6 +186,10 @@ def ensure_within_workspace(path: Path, workspace: Path) -> Path:
     return resolved
 
 
+def _repo_read_only_flag(raw_repo: dict[str, Any]) -> bool:
+    return bool(raw_repo.get("read_only", raw_repo.get("read-only", False)))
+
+
 def resolve_repo(workspace: Path, raw_repo: dict[str, Any]) -> RepoSpec:
     if "name" not in raw_repo:
         raise ValueError("Each repo entry must include 'name'.")
@@ -216,25 +222,141 @@ def resolve_repo(workspace: Path, raw_repo: dict[str, Any]) -> RepoSpec:
         description=raw_repo.get("description", ""),
         brief=raw_repo.get("brief", ""),
         checks=list(raw_repo.get("checks") or []),
+        read_only=_repo_read_only_flag(raw_repo),
     )
 
 
 def parse_config(
     config_path: Path, cli_workspace: str | None = None, resume: bool = False
 ) -> AgentConfig:
-    raw = to_plain_data(load_yaml_config(str(config_path)))
-    raw = hydrate_config_support_files(raw, config_dir=config_path.resolve().parent)
+    original_raw = to_plain_data(load_yaml_config(str(config_path)))
+    raw = hydrate_config_support_files(original_raw, config_dir=config_path.resolve().parent)
     workspace, workspace_reused = resolve_workspace(raw, cli_workspace=cli_workspace, resume=resume)
     setup_workspace(str(workspace), project=str(raw.get("project") or "run"))
 
     repos = [resolve_repo(workspace, r) for r in raw.get("repos", [])]
 
-    return AgentConfig.from_raw(
+    cfg = AgentConfig.from_raw(
         raw,
         workspace=workspace,
         workspace_reused=workspace_reused,
         repos=repos,
     )
+    cfg.config_path = config_path.resolve()
+    cfg.raw_config = dict(original_raw)
+    return cfg
+
+
+def _load_workspace_source_config(workspace: Path) -> tuple[dict[str, Any], Path | None]:
+    artifact_path = (workspace / DEFAULT_SOURCE_CONFIG_YAML).resolve()
+    if not artifact_path.exists() or not artifact_path.is_file():
+        return {}, None
+
+    payload = to_plain_data(load_yaml_config(str(artifact_path)))
+    if not isinstance(payload, dict):
+        return {}, None
+
+    raw_config = payload.get("raw_config")
+    config_path = payload.get("config_path")
+    resolved_path = Path(str(config_path)).resolve() if isinstance(config_path, str) and config_path else None
+    return (dict(raw_config) if isinstance(raw_config, dict) else {}), resolved_path
+
+
+def _synthesized_workspace_analysis_raw(
+    workspace: Path,
+    *,
+    model_name: str,
+) -> dict[str, Any]:
+    summary_path = (workspace / DEFAULT_SUMMARY_JSON).resolve()
+    summary_payload = to_plain_data(load_yaml_config(str(summary_path))) if summary_path.exists() else {}
+    if not isinstance(summary_payload, dict):
+        summary_payload = {}
+
+    repos_dir = (workspace / "repos").resolve()
+    repo_entries: list[dict[str, Any]] = []
+    if repos_dir.exists():
+        for child in sorted(repos_dir.iterdir()):
+            if not child.is_dir():
+                continue
+            repo_entries.append(
+                {
+                    "name": child.name,
+                    "path": str(child),
+                    "checkout": False,
+                }
+            )
+
+    project_name = str(summary_payload.get("project") or workspace.name)
+    return {
+        "project": project_name,
+        "problem": (
+            "Investigate this prior Marvin workspace, identify likely failure causes or "
+            "misconfiguration, and recommend YAML updates for the next run."
+        ),
+        "mode": "analyze_workspace",
+        "workspace": str(workspace),
+        "planning": {"mode": "hierarchical"},
+        "task": {
+            "execute_after_plan": False,
+            "confirm_before_execute": False,
+        },
+        "models": {
+            "default": model_name,
+            "planner": model_name,
+        },
+        "repos": repo_entries,
+    }
+
+
+def build_workspace_analysis_config(
+    workspace_path: Path,
+    *,
+    config_path: Path | None = None,
+    model_name: str = "openai:gpt-5.4",
+) -> AgentConfig:
+    workspace = workspace_path.resolve()
+    if not workspace.exists() or not workspace.is_dir():
+        raise FileNotFoundError(f"Workspace does not exist: {workspace}")
+
+    if config_path is not None:
+        cfg = parse_config(config_path.resolve(), cli_workspace=str(workspace), resume=True)
+    else:
+        raw_config, stored_config_path = _load_workspace_source_config(workspace)
+        if raw_config:
+            hydrated = (
+                hydrate_config_support_files(raw_config, config_dir=stored_config_path.parent)
+                if stored_config_path is not None and stored_config_path.exists()
+                else dict(raw_config)
+            )
+            setup_workspace(str(workspace), project=str(hydrated.get("project") or "run"))
+            repos = [resolve_repo(workspace, repo) for repo in hydrated.get("repos", [])]
+            cfg = AgentConfig.from_raw(
+                hydrated,
+                workspace=workspace,
+                workspace_reused=True,
+                repos=repos,
+            )
+            cfg.config_path = stored_config_path
+            cfg.raw_config = dict(raw_config)
+        else:
+            raw = _synthesized_workspace_analysis_raw(workspace, model_name=model_name)
+            setup_workspace(str(workspace), project=str(raw.get("project") or "run"))
+            repos = [resolve_repo(workspace, repo) for repo in raw.get("repos", [])]
+            cfg = AgentConfig.from_raw(
+                raw,
+                workspace=workspace,
+                workspace_reused=True,
+                repos=repos,
+            )
+            cfg.raw_config = dict(raw)
+            cfg.config_path = None
+
+    cfg.mode = "analyze_workspace"
+    cfg.planning_mode = "hierarchical"
+    cfg.confirm_before_execute = False
+    cfg.execute_after_plan = False
+    cfg.planner_model = cfg.planner_model or model_name
+    return cfg
 
 
 def ensure_repo(repo: RepoSpec) -> None:
@@ -305,6 +427,7 @@ def repo_listing(repos: list[RepoSpec]) -> str:
     lines: list[str] = []
     for repo in repos:
         bits = [f"- {repo.name}: {repo.path}"]
+        bits.append(f"role={repo.role_label}")
         if repo.branch:
             bits.append(f"branch={repo.branch}")
         if repo.language:
@@ -318,10 +441,11 @@ def repo_listing(repos: list[RepoSpec]) -> str:
 
 
 def default_working_directory(cfg: AgentConfig) -> Path | None:
-    if not cfg.repos:
+    execution_repos = cfg.execution_repos
+    if not execution_repos:
         return cfg.workspace
-    if len(cfg.repos) == 1:
-        return cfg.repos[0].path
+    if len(execution_repos) == 1:
+        return execution_repos[0].path
     return cfg.workspace
 
 
@@ -346,6 +470,8 @@ def render_status(cfg: AgentConfig) -> None:
     table.add_row("Resume execution state", "yes" if cfg.resume_execution_state else "no")
     table.add_row("Commit each step", "yes" if cfg.commit_each_step else "no")
     table.add_row("Verbose IO", "yes" if cfg.verbose_io else "no")
+    table.add_row("Execution repos", str(len(cfg.execution_repos)))
+    table.add_row("Reference repos", str(len(cfg.reference_repos)))
     emit_table(table)
 
     safe_execution = sanitize_for_logging(cfg.execution)

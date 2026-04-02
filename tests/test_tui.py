@@ -115,6 +115,8 @@ def test_build_completion_summary_text_includes_stage_rollups_and_hotspots() -> 
         "Cache effectiveness: cached 750 of 1000 sent tokens "
         "(75% hit rate, 250 uncached)." in text
     )
+    assert "Planning mode: single" in text
+    assert "Run learning artifact:" in text
     assert "Executing: calls=2" in text
     assert "1. Executing: step 1/2" in text
 

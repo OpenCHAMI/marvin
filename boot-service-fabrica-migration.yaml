@@ -21,6 +21,13 @@ repos:
     checks:
       - make test
       - go test ./...
+  - name: fabrica
+    url: https://github.com/OpenCHAMI/fabrica.git
+    branch: main
+    checkout: true
+    read-only: true
+    language: generic
+    description: Reference-only Fabrica repository for generator workflow, source-of-truth inputs, and migration context.
 
 models:
   default: openai:gpt-5.4
