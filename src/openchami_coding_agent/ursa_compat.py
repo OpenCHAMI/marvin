@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import importlib
-import inspect
 from collections.abc import Callable
 from functools import cache
 from typing import Any
+
+from .ursa_adapter import ADAPTER
 
 AGENT_MODULE_CANDIDATES = (
     "ursa.agents",
@@ -23,21 +23,7 @@ UTILITY_MODULE_CANDIDATES = (
 
 @cache
 def _resolve_attribute(attribute: str, module_candidates: tuple[str, ...]) -> Any:
-    errors: list[str] = []
-    for module_name in module_candidates:
-        try:
-            module = importlib.import_module(module_name)
-        except Exception as exc:
-            errors.append(f"{module_name}: {type(exc).__name__}: {exc}")
-            continue
-        if hasattr(module, attribute):
-            return getattr(module, attribute)
-
-    searched = ", ".join(module_candidates)
-    details = "; ".join(errors)
-    raise ImportError(
-        f"Unable to resolve URSA attribute '{attribute}' in: {searched}. {details}"
-    )
+    return ADAPTER.resolve_attribute(attribute, module_candidates)
 
 
 def _rename_kwargs(kwargs: dict[str, Any], aliases: dict[str, str]) -> dict[str, Any]:
@@ -50,41 +36,7 @@ def _rename_kwargs(kwargs: dict[str, Any], aliases: dict[str, str]) -> dict[str,
 
 
 def _call_with_compatible_kwargs(target: Callable[..., Any], **kwargs: Any) -> Any:
-    signature = inspect.signature(target)
-    parameters = [
-        parameter
-        for name, parameter in signature.parameters.items()
-        if name != "self"
-    ]
-    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters):
-        return target(**kwargs)
-
-    accepted_names = {
-        parameter.name
-        for parameter in parameters
-        if parameter.kind
-        in {
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        }
-    }
-    filtered = {name: value for name, value in kwargs.items() if name in accepted_names}
-
-    missing_required = [
-        parameter.name
-        for parameter in parameters
-        if parameter.kind
-        in {
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            inspect.Parameter.KEYWORD_ONLY,
-        }
-        and parameter.default is inspect.Parameter.empty
-        and parameter.name not in filtered
-    ]
-    if missing_required:
-        missing = ", ".join(missing_required)
-        raise TypeError(f"Missing required arguments: {missing}")
-    return target(**filtered)
+    return ADAPTER.call_with_compatible_kwargs(target, **kwargs)
 
 
 def instantiate_agent(agent_class: type[Any], **kwargs: Any) -> Any:

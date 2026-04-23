@@ -181,3 +181,68 @@ def test_build_workspace_analysis_prompt_includes_evidence_and_answers() -> None
     assert "summary: checks failed" in prompt
     assert "Which repo failed?: boot-service" in prompt
     assert "Planning mode for this analysis: hierarchical" in prompt
+
+
+def test_build_planner_control_suffix_includes_repo_profile_hints(tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        profiles_dir = workspace / "repo_profiles"
+        profiles_dir.mkdir(parents=True)
+        (profiles_dir / "svc.yaml").write_text(
+                """
+repo: svc
+language_toolchain:
+    - python
+validation_commands:
+    - pytest -q
+critical_files:
+    - pyproject.toml
+protected_paths:
+    - .github/
+""".strip(),
+                encoding="utf-8",
+        )
+        cfg = AgentConfig(
+                project="OpenCHAMI",
+                problem="Plan with profile hints.",
+                workspace=workspace,
+                repos=[RepoSpec(name="svc", path=workspace / "repos" / "svc")],
+        )
+
+        prompt = build_planner_control_suffix(cfg)
+
+        assert "Repository profile hints (OpenCHAMI context):" in prompt
+        assert "svc: languages=python" in prompt
+        assert "validation=pytest -q" in prompt
+
+
+def test_build_subplanner_control_suffix_includes_repo_profile_hints(tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        profiles_dir = workspace / "repo_profiles"
+        profiles_dir.mkdir(parents=True)
+        (profiles_dir / "svc.yaml").write_text(
+                """
+repo: svc
+language_toolchain:
+    - go
+validation_commands:
+    - go test ./...
+""".strip(),
+                encoding="utf-8",
+        )
+        cfg = AgentConfig(
+                project="OpenCHAMI",
+                problem="Subplan with profile hints.",
+                workspace=workspace,
+                repos=[RepoSpec(name="svc", path=workspace / "repos" / "svc")],
+        )
+
+        prompt = build_subplanner_control_suffix(
+                cfg,
+                main_step=PlanStep(name="Inspect", description="Inspect repo"),
+                main_step_index=1,
+                total_main_steps=2,
+        )
+
+        assert "Repository profile hints (OpenCHAMI context):" in prompt
+        assert "svc: languages=go" in prompt
+        assert "validation=go test ./..." in prompt

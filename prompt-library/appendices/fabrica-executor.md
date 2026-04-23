@@ -1,6 +1,19 @@
-Fabrica execution guidance:
-- Treat Fabrica as a Go API code generator, not as a deployment-config repository.
-- Update source inputs first: `.fabrica.yaml`, `apis.yaml`, and versioned `apis/<group>/<version>/*_types.go` files.
-- Do not patch `*_generated.go` files by hand unless the task is explicitly about the generator itself.
-- After changing generator inputs, run or explicitly plan for `fabrica generate` and inspect the generated fallout.
-- Respect the documented safe-edit boundary in `cmd/server/main.go`; generated sections can be rewritten.
+Fabrica Executor Appendix
+
+Generation Model
+- Treat Fabrica as a generator pipeline, not a handwritten service tree.
+- Edit source inputs first, then regenerate and inspect fallout.
+
+Primary Inputs
+- .fabrica.yaml
+- apis.yaml
+- apis/<group>/<version>/*_types.go
+
+Guardrails
+- Do not hand-edit generated files unless task scope is generator internals.
+- Keep custom edits within documented safe-edit boundaries.
+- Verify generation and compile/test after input changes.
+
+Review Focus
+- Review source-input intent and expected generated impact.
+- Note compatibility implications for versioned APIs.

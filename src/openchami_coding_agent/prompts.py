@@ -2,17 +2,99 @@
 
 from __future__ import annotations
 
+from importlib import resources
+
 from .config import default_working_directory, repo_listing
 from .models import AgentConfig, PlanStep, RepoSpec
 from .plan_tracking import extract_plan_steps
+from .repo_profiles import load_repo_profiles
 
 _MAX_PLAN_DIGEST_STEPS = 8
 _MAX_STEP_DETAIL_CHARS = 160
 _MAX_PROBLEM_CHARS = 600
-_MAX_FAILURE_CHARS = 4000
+_MAX_FAILURE_CHARS = 1800
 _SOFT_MAIN_PLAN_STEP_MIN = 4
 _SOFT_MAIN_PLAN_STEP_MAX = 10
 _SOFT_SUBPLAN_STEP_MAX = 5
+
+
+def _list_preview(payload: dict[str, object], key: str, *, limit: int = 3) -> str:
+    values = payload.get(key)
+    if not isinstance(values, list) or not values:
+        return "-"
+    items = [
+        _clip_text(str(value), 70)
+        for value in values
+        if str(value).strip()
+    ][:limit]
+    if not items:
+        return "-"
+    return ", ".join(items)
+
+
+def _repo_profile_digest(cfg: AgentConfig, *, max_profiles: int = 5) -> str:
+    profiles = load_repo_profiles(cfg)
+    if not profiles:
+        return "- none"
+
+    configured_repo_names = [repo.name for repo in cfg.repos]
+    matched_names = [name for name in configured_repo_names if name in profiles]
+    profile_names = matched_names or sorted(profiles.keys())
+
+    lines: list[str] = []
+    for name in profile_names[:max_profiles]:
+        payload = profiles.get(name) or {}
+        language_toolchain = _list_preview(payload, "language_toolchain")
+        validation_commands = _list_preview(payload, "validation_commands")
+        critical_files = _list_preview(payload, "critical_files")
+        protected_paths = _list_preview(payload, "protected_paths")
+        lines.append(
+            "- "
+            f"{name}: "
+            f"languages={language_toolchain}; "
+            f"validation={validation_commands}; "
+            f"critical={critical_files}; "
+            f"protected={protected_paths}"
+        )
+    if len(profile_names) > max_profiles:
+        lines.append(f"- +{len(profile_names) - max_profiles} more profile(s)")
+    return "\n".join(lines)
+
+
+def _phase_contract(phase: str) -> str:
+    try:
+        path = resources.files("openchami_coding_agent").joinpath(
+            "prompt_library", f"{phase}.md"
+        )
+    except ModuleNotFoundError:
+        return ""
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def _reminder_text(name: str) -> str:
+    try:
+        path = resources.files("openchami_coding_agent").joinpath(
+            "prompt_library", "reminders", f"{name}.md"
+        )
+    except ModuleNotFoundError:
+        return ""
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def _phase_reminders(phase: str) -> str:
+    reminder_sets = {
+        "plan": ["tool_use", "repo_hints"],
+        "execute": ["tool_use", "validation_rules", "repo_hints"],
+        "repair": ["tool_use", "validation_rules", "repo_hints"],
+        "summarize": ["validation_rules", "repo_hints"],
+    }
+    names = reminder_sets.get(phase, ["tool_use", "repo_hints"])
+    parts = [part for part in (_reminder_text(name) for name in names) if part]
+    return "\n\n".join(parts)
 
 
 def _clip_text(text: str, max_chars: int) -> str:
@@ -121,6 +203,8 @@ def build_repo_fix_prompt_prefix(
         else ""
     )
     repo_brief = f"- brief: {_clip_text(repo.brief, 500)}\n" if repo.brief else ""
+    contract = _clip_tail_text(_phase_contract("repair"), 1200)
+    reminders = _clip_tail_text(_phase_reminders("repair"), 700)
     prompt = f"""
 You are {cfg.agent_name}, repairing a repository that failed validation during OpenCHAMI execution.
 
@@ -150,6 +234,8 @@ Requirements:
    do not re-plan unrelated work.
 6. {_comment_preservation_instruction()}
 """.strip()
+    prompt = _append_instruction_section(prompt, "Repair phase contract", contract)
+    prompt = _append_instruction_section(prompt, "Operational reminders", reminders)
     prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
     return _append_instruction_section(
         prompt,
@@ -200,6 +286,8 @@ def build_repo_fix_prompt(
 
 
 def build_planner_prompt_prefix(cfg: AgentConfig) -> str:
+    contract = _phase_contract("plan")
+    reminders = _phase_reminders("plan")
     prompt = f"""
 You are {cfg.agent_name}, drafting the implementation plan for OpenCHAMI development work.
 
@@ -233,6 +321,8 @@ Structured step schema requirements:
 - If the planner runtime supports structured output, populate that schema directly.
 - If not, ensure the Markdown still maps cleanly to one actionable step per numbered item.
 """.strip()
+    prompt = _append_instruction_section(prompt, "Plan phase contract", contract)
+    prompt = _append_instruction_section(prompt, "Operational reminders", reminders)
     prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
     return _append_instruction_section(
         prompt,
@@ -265,6 +355,9 @@ Problem:
 Available repositories:
 {repo_listing(cfg.repos)}
 
+Repository profile hints (OpenCHAMI context):
+{_repo_profile_digest(cfg)}
+
 Workspace root (hard containment):
 {workspace}
 
@@ -295,6 +388,8 @@ def build_planner_prompt(cfg: AgentConfig) -> str:
 
 
 def build_workspace_analysis_prompt_prefix(cfg: AgentConfig) -> str:
+    contract = _phase_contract("summarize")
+    reminders = _phase_reminders("summarize")
     prompt = f"""
 You are {cfg.agent_name}, performing a post-run workspace analysis for Marvin.
 
@@ -321,6 +416,8 @@ Analysis requirements:
 11. Treat this as a hierarchical analysis: start with the major issues, then the narrower YAML changes that follow from them.
 12. {_comment_preservation_instruction()}
 """.strip()
+    prompt = _append_instruction_section(prompt, "Summarize/Learn phase contract", contract)
+    prompt = _append_instruction_section(prompt, "Operational reminders", reminders)
     prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
     return _append_instruction_section(
         prompt,
@@ -351,6 +448,9 @@ Planning mode for this analysis: hierarchical
 Configured repositories:
 {repo_listing(cfg.repos)}
 
+Repository profile hints (OpenCHAMI context):
+{_repo_profile_digest(cfg)}
+
 Original task:
 {_clip_text(cfg.problem, _MAX_PROBLEM_CHARS * 2)}
 
@@ -368,6 +468,8 @@ def build_executor_prompt(
     *,
     structured_plan: list[PlanStep] | None = None,
 ) -> str:
+    contract = _phase_contract("execute")
+    reminders = _phase_reminders("execute")
     workspace = str(cfg.workspace) if cfg.workspace else "<workspace-not-set>"
     workdir = str(default_working_directory(cfg) or workspace)
     requirements = (
@@ -417,6 +519,8 @@ Execution rules:
     do not infer extra work from omitted plan details.
 11. {_comment_preservation_instruction()}
 """.strip()
+    prompt = _append_instruction_section(prompt, "Execute phase contract", contract)
+    prompt = _append_instruction_section(prompt, "Operational reminders", reminders)
     prompt = _append_instruction_section(prompt, "Shared agent instructions", cfg.prompt_appendix)
     return _append_instruction_section(
         prompt,
@@ -531,6 +635,9 @@ Default shell working directory:
 
 Available repositories:
 {repo_listing(cfg.repos)}
+
+Repository profile hints (OpenCHAMI context):
+{_repo_profile_digest(cfg)}
 
 Overall project:
 - project: {cfg.project}

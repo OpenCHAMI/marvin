@@ -775,6 +775,7 @@ def build_config_payload(spec: ConfigInitSpec) -> dict[str, Any]:
             "proposal_markdown": f"docs/{output_stem}-proposal.md",
             "plan_json": f"artifacts/{output_stem}-plan.json",
             "summary_json": f"artifacts/{output_stem}-summary.json",
+            "explore_handoff_json": f"artifacts/{output_stem}-explore-handoff.json",
             "executor_progress_json": f"artifacts/{output_stem}-progress.json",
         },
     }

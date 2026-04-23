@@ -1,6 +1,16 @@
 Repository-first OpenCHAMI guidance:
-- Inspect the checked-out repository before trusting issue text or prior assumptions.
-- Preserve existing public behavior and contracts unless the task explicitly requires a change.
-- Follow the repository's native build, test, lint, and layout conventions instead of introducing new workflow patterns.
-- Prefer small, reviewable edits and call out compatibility risks when a change may affect sibling OpenCHAMI repos.
-- Treat notes and reviewed evidence as intent clues, not substitutes for reading the actual code.
+
+Operating Principles
+- Ground all decisions in repository evidence before changing code.
+- Preserve existing behavior unless the task requires explicit contract changes.
+- Prefer incremental, reviewable edits that keep rollback risk low.
+
+Cross-Repo Awareness
+- Call out changes likely to affect sibling OpenCHAMI repositories.
+- Highlight schema, API, and deployment coupling when present.
+- Avoid hardcoding repo-specific policy where a profile-driven rule is available.
+
+Reliability and Safety
+- Keep verification explicit and evidence-backed.
+- Avoid hidden side effects in automation paths.
+- Surface operator-impacting changes early in summaries and artifacts.

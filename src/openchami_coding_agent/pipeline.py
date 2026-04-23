@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import yaml
@@ -49,6 +50,7 @@ from .reporting import (
     set_reporter,
     set_workspace_name,
 )
+from .repo_profiles import repo_profile_paths
 from .summary_view import build_compact_execution_summary_lines, build_partial_success_payload
 from .summary_view import (
     build_operator_feedback_template,
@@ -74,6 +76,11 @@ from .utils import (
     render_yaml_text,
     write_json_file,
     write_text_file,
+)
+from .verification import (
+    build_verification_bundle,
+    render_verification_markdown,
+    run_verifier_mesh,
 )
 
 _MAX_EXECUTION_MAIN_STEPS = 10
@@ -114,6 +121,55 @@ def _load_optional_workspace_json(workspace: Any, rel_path: str) -> dict[str, An
         return {}
     payload = load_json_file(path, {})
     return payload if isinstance(payload, dict) else {}
+
+
+def _build_explore_handoff_payload(
+    *,
+    cfg: AgentConfig,
+    workspace: Any,
+    summary_payload: dict[str, Any],
+    partial_success_payload: dict[str, Any],
+    verification_report: dict[str, Any],
+    operator_feedback_markdown: str,
+) -> dict[str, Any]:
+    verification_section = summary_payload.get("verification") or {}
+    operator_notes = extract_operator_feedback_notes(operator_feedback_markdown)
+    return {
+        "schema_version": 1,
+        "producer_phase": "summarize",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "workspace": str(workspace),
+        "project": cfg.project,
+        "run": {
+            "planning_mode": summary_payload.get("planning_mode") or cfg.planning_mode,
+            "all_checks_passed": bool(summary_payload.get("all_checks_passed", False)),
+            "completed_repos": list(summary_payload.get("completed_repos") or []),
+            "failed_repos": list(summary_payload.get("failed_repos") or []),
+        },
+        "verification": {
+            "summary_verdict": verification_section.get("summary_verdict")
+            or verification_report.get("summary_verdict"),
+            "required_failures": list(
+                verification_section.get("required_failures")
+                or verification_report.get("required_failures")
+                or []
+            ),
+        },
+        "resume_hints": {
+            "resume_replan_scope": partial_success_payload.get("resume_replan_scope") or "none",
+            "completed_step_count": int(partial_success_payload.get("completed_step_count") or 0),
+            "failed_repos": list(partial_success_payload.get("failed_repos") or []),
+            "operator_notes": list(operator_notes),
+        },
+        "artifacts": {
+            "summary_json": cfg.summary_json,
+            "partial_success_json": cfg.partial_success_json,
+            "operator_feedback_markdown": cfg.operator_feedback_markdown,
+            "verification_json": cfg.verification_json,
+            "verification_markdown": cfg.verification_markdown,
+            "run_trace_json": "artifacts/marvin_run_trace.json",
+        },
+    }
 
 
 def _extract_section_lines(markdown: str, heading: str) -> list[str]:
@@ -232,6 +288,7 @@ def _workspace_analysis_evidence(cfg: AgentConfig) -> dict[str, Any]:
         raise RuntimeError("Workspace must be set before analysis.")
 
     summary_payload = _load_optional_workspace_json(workspace, cfg.summary_json)
+    explore_handoff_payload = _load_optional_workspace_json(workspace, cfg.explore_handoff_json)
     partial_success_payload = _load_optional_workspace_json(workspace, cfg.partial_success_json)
     if not partial_success_payload and isinstance(summary_payload.get("partial_success"), dict):
         partial_success_payload = dict(summary_payload["partial_success"])
@@ -327,6 +384,12 @@ def _workspace_analysis_evidence(cfg: AgentConfig) -> dict[str, Any]:
             + (operator_feedback_markdown or "<missing>"),
             "Execution summary JSON:\n"
             + (render_yaml_text(summary_payload).strip() if summary_payload else "<missing>"),
+            "Summarize-to-explore handoff JSON:\n"
+            + (
+                render_yaml_text(explore_handoff_payload).strip()
+                if explore_handoff_payload
+                else "<missing>"
+            ),
             "Execution progress JSON:\n"
             + (render_yaml_text(progress_payload).strip() if progress_payload else "<missing>"),
             "Plan JSON:\n"
@@ -342,6 +405,7 @@ def _workspace_analysis_evidence(cfg: AgentConfig) -> dict[str, Any]:
 
     return {
         "summary_payload": summary_payload,
+        "explore_handoff_payload": explore_handoff_payload,
         "run_trace": run_trace_payload,
         "partial_success_payload": partial_success_payload,
         "operator_feedback_markdown": operator_feedback_markdown,
@@ -688,6 +752,33 @@ def run_pipeline(cfg: AgentConfig) -> int:
             )
         return 0
 
+    prior_explore_handoff = _load_optional_workspace_json(workspace, cfg.explore_handoff_json)
+    explore_notes = ["Repository discovery and workspace context loading in progress."]
+    if prior_explore_handoff:
+        resume_hints = prior_explore_handoff.get("resume_hints") or {}
+        verification = prior_explore_handoff.get("verification") or {}
+        required_failures = list(verification.get("required_failures") or [])
+        verdict = verification.get("summary_verdict") or "unknown"
+        explore_notes.append(f"Loaded summarize handoff ({cfg.explore_handoff_json}).")
+        explore_notes.append(
+            "Prior verification verdict: "
+            f"{verdict}; required failures: {', '.join(required_failures) if required_failures else '-'}"
+        )
+        explore_notes.append(
+            "Suggested replan scope from prior run: "
+            f"{resume_hints.get('resume_replan_scope') or 'none'}"
+        )
+
+    update_tracker_markdown(
+        workspace=workspace,
+        stage="explore",
+        activity="Explore phase: resolving repositories and read-only context.",
+        plan_steps=[],
+        completed_step_indices=set(),
+        notes=explore_notes,
+        reconciliation="No source mutations should happen during explore.",
+    )
+
     for repo in cfg.repos:
         ensure_repo(repo)
 
@@ -863,11 +954,59 @@ def run_pipeline(cfg: AgentConfig) -> int:
     cache_summary = summary_payload.get("token_cache_summary") or build_token_cache_summary(
         summary_payload.get("token_usage") or {}
     )
+    update_tracker_markdown(
+        workspace=workspace,
+        stage="verify",
+        activity="Verify phase started; running tiered verifier mesh.",
+        plan_steps=plan_steps,
+        completed_step_indices=set(range(len(plan_steps))),
+        notes=["Building immutable verification handoff bundle."],
+        reconciliation="Execution complete; verification in progress.",
+    )
+    summary_path = write_json_file(workspace, cfg.summary_json, summary_payload)
+    run_trace_path = write_json_file(
+        workspace,
+        "artifacts/marvin_run_trace.json",
+        summary_payload.get("run_trace") or {},
+    )
+    verification_bundle = build_verification_bundle(
+        cfg,
+        plan_path=(workspace / cfg.proposal_markdown).resolve(),
+        execution_summary_path=summary_path,
+        run_trace_path=run_trace_path,
+        repo_profile_paths=repo_profile_paths(cfg),
+    )
+    verification_report = run_verifier_mesh(cfg, bundle=verification_bundle)
+    verification_json_path = write_json_file(workspace, cfg.verification_json, verification_report)
+    verification_markdown_path = write_text_file(
+        workspace,
+        cfg.verification_markdown,
+        render_verification_markdown(verification_report),
+    )
+    summary_payload["verification"] = {
+        "summary_verdict": verification_report.get("summary_verdict"),
+        "required_failures": verification_report.get("required_failures") or [],
+        "verification_report_json": str(verification_json_path),
+        "verification_report_markdown": str(verification_markdown_path),
+    }
     summary_path = write_json_file(workspace, cfg.summary_json, summary_payload)
     partial_success_path = write_json_file(
         workspace,
         cfg.partial_success_json,
         partial_success_payload,
+    )
+    explore_handoff_payload = _build_explore_handoff_payload(
+        cfg=cfg,
+        workspace=workspace,
+        summary_payload=summary_payload,
+        partial_success_payload=partial_success_payload,
+        verification_report=verification_report,
+        operator_feedback_markdown=operator_feedback_payload,
+    )
+    explore_handoff_path = write_json_file(
+        workspace,
+        cfg.explore_handoff_json,
+        explore_handoff_payload,
     )
     operator_feedback_written_path = write_text_file(
         workspace,
@@ -875,7 +1014,10 @@ def run_pipeline(cfg: AgentConfig) -> int:
         operator_feedback_payload,
     )
     emit_text(f"Wrote execution summary: {summary_path}")
+    emit_text(f"Wrote verification report JSON: {verification_json_path}")
+    emit_text(f"Wrote verification report Markdown: {verification_markdown_path}")
     emit_text(f"Wrote partial-success artifact: {partial_success_path}")
+    emit_text(f"Wrote summarize-to-explore handoff: {explore_handoff_path}")
     emit_text(f"Wrote operator feedback template: {operator_feedback_written_path}")
     progress_path = progress_file(workspace, cfg.executor_progress_json)
     emit_text(f"Wrote execution progress: {progress_path}")
@@ -883,6 +1025,31 @@ def run_pipeline(cfg: AgentConfig) -> int:
         "\n".join(build_compact_execution_summary_lines(workspace.name, summary_payload)),
         border_style="green" if summary_payload.get("all_checks_passed", True) else "yellow",
     )
+
+    update_tracker_markdown(
+        workspace=workspace,
+        stage="summarize",
+        activity="Summarize/Learn phase complete; artifacts persisted.",
+        plan_steps=plan_steps,
+        completed_step_indices=set(range(len(plan_steps))),
+        notes=[
+            f"Verification verdict: {verification_report.get('summary_verdict')}",
+            f"Required verifier failures: {', '.join(verification_report.get('required_failures') or []) or '-'}",
+        ],
+        reconciliation="Run artifacts finalized.",
+    )
+
+    verification_required_failures = list(verification_report.get("required_failures") or [])
+    if verification_required_failures:
+        emit_panel(
+            (
+                "Required verifier(s) failed: "
+                f"{', '.join(verification_required_failures)}. "
+                "See the verification report artifacts for targeted repair scope."
+            ),
+            border_style="red",
+        )
+        return 1
 
     if not summary_payload.get("all_checks_passed", True) and not cfg.skip_failed_repos:
         emit_panel(

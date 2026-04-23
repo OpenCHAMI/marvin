@@ -10,6 +10,7 @@ from .config import build_workspace_analysis_config, parse_config
 from .config_init import add_init_arguments, run_init_command
 from .constants import AGENT_NAME
 from .pipeline import run_pipeline_with_reporter
+from .repo_profile_builder import generate_repo_profile
 from .reporting import RichProgressReporter
 from .tui import run_textual_tui
 from .ursa_compat import load_yaml_config
@@ -22,13 +23,15 @@ def build_root_parser() -> argparse.ArgumentParser:
         usage=(
             "%(prog)s <config> [run options]\n"
             "       %(prog)s init [wizard options]\n"
-            "       %(prog)s analyze-workspace <workspace> [analysis options]"
+            "       %(prog)s analyze-workspace <workspace> [analysis options]\n"
+            "       %(prog)s profile-repo <workspace> <repo> [profile options]"
         ),
         epilog=(
             "Run commands:\n"
             "  <config>    Execute Marvin with an existing YAML config.\n"
             "  init        Interactively create a new Marvin YAML config file.\n"
-            "  analyze-workspace  Inspect a previous workspace and recommend YAML updates."
+            "  analyze-workspace  Inspect a previous workspace and recommend YAML updates.\n"
+            "  profile-repo  Build/update a structured OpenCHAMI repo profile from repository evidence."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -113,6 +116,38 @@ def build_workspace_analysis_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_repo_profile_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=f"{AGENT_NAME}: build a structured repository profile"
+    )
+    parser.add_argument("workspace", help="Path to an existing Marvin workspace")
+    parser.add_argument("repo", help="Repository name, typically under <workspace>/repos/")
+    parser.add_argument(
+        "--repo-path",
+        help="Optional explicit repository path. Defaults to <workspace>/repos/<repo>.",
+    )
+    parser.add_argument(
+        "--output",
+        help="Optional profile output path. Defaults to <workspace>/repo_profiles/<repo>.yaml.",
+    )
+    parser.add_argument(
+        "--model",
+        default="openai:gpt-5.4",
+        help="Planner model to use for repository profiling.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite profile output if it already exists.",
+    )
+    parser.add_argument(
+        "--verbose-io",
+        action="store_true",
+        help="Print full underlying tool stdout/stderr from agent execution.",
+    )
+    return parser
+
+
 def run_with_config(args: argparse.Namespace) -> int:
     config_path = Path(args.config).resolve()
     raw = to_plain_data(load_yaml_config(str(config_path)))
@@ -166,6 +201,19 @@ def run_workspace_analysis(args: argparse.Namespace) -> int:
     return run_pipeline_with_reporter(cfg, RichProgressReporter())
 
 
+def run_repo_profile_builder(args: argparse.Namespace) -> int:
+    generate_repo_profile(
+        workspace=Path(args.workspace),
+        repo_name=args.repo,
+        model_name=args.model,
+        repo_path=Path(args.repo_path).resolve() if args.repo_path else None,
+        output_path=Path(args.output).resolve() if args.output else None,
+        verbose_io=bool(args.verbose_io),
+        overwrite=bool(args.overwrite),
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in {"-h", "--help"}:
@@ -182,6 +230,10 @@ def main(argv: list[str] | None = None) -> int:
     if argv[0] == "analyze-workspace":
         parser = build_workspace_analysis_parser()
         return run_workspace_analysis(parser.parse_args(argv[1:]))
+
+    if argv[0] == "profile-repo":
+        parser = build_repo_profile_parser()
+        return run_repo_profile_builder(parser.parse_args(argv[1:]))
 
     parser = build_run_parser()
     return run_with_config(parser.parse_args(argv))

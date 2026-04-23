@@ -54,6 +54,10 @@ def test_build_config_payload_populates_defaults(tmp_path: Path) -> None:
         in payload["task"]["notes"]
     )
     assert payload["outputs"]["plan_json"] == "artifacts/boot-service-issue-6-plan.json"
+    assert (
+        payload["outputs"]["explore_handoff_json"]
+        == "artifacts/boot-service-issue-6-explore-handoff.json"
+    )
 
 
 def test_run_init_command_writes_yaml(tmp_path: Path) -> None:
@@ -141,6 +145,39 @@ def test_cli_main_dispatches_analyze_workspace_command(monkeypatch, tmp_path: Pa
     parsed = captured["args"]
     assert parsed.workspace == str(workspace)
     assert parsed.model == "openai:gpt-5.4"
+
+
+def test_cli_main_dispatches_profile_repo_command(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_repo_profile_builder(args):
+        captured["args"] = args
+        return 29
+
+    monkeypatch.setattr(
+        "openchami_coding_agent.cli.run_repo_profile_builder",
+        fake_run_repo_profile_builder,
+    )
+
+    workspace = tmp_path / "run"
+    assert (
+        main(
+            [
+                "profile-repo",
+                str(workspace),
+                "tokensmith",
+                "--model",
+                "openai:gpt-5.4",
+                "--overwrite",
+            ]
+        )
+        == 29
+    )
+    parsed = captured["args"]
+    assert parsed.workspace == str(workspace)
+    assert parsed.repo == "tokensmith"
+    assert parsed.model == "openai:gpt-5.4"
+    assert parsed.overwrite is True
 
 
 def test_run_workspace_analysis_builds_config_without_yaml(monkeypatch, tmp_path: Path) -> None:

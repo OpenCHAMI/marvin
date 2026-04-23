@@ -299,3 +299,83 @@ def test_run_pipeline_writes_partial_success_artifact_for_execution(
     assert partial_success["resume_replan_scope"] == "none"
     assert "# Marvin Operator Feedback" in operator_feedback
     assert "refresh_subplans: no" in operator_feedback
+
+    explore_handoff = json.loads(
+        (workspace / cfg.explore_handoff_json).read_text(encoding="utf-8")
+    )
+    assert explore_handoff["schema_version"] == 1
+    assert explore_handoff["producer_phase"] == "summarize"
+    assert explore_handoff["run"]["failed_repos"] == ["svc"]
+    assert explore_handoff["resume_hints"]["resume_replan_scope"] == "none"
+    assert explore_handoff["artifacts"]["summary_json"] == cfg.summary_json
+
+
+def test_run_pipeline_explore_phase_consumes_prior_summarize_handoff(
+    tmp_path: Path, monkeypatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repo_path = workspace / "svc"
+    repo_path.mkdir()
+
+    cfg = AgentConfig(
+        project="OpenCHAMI",
+        problem="Generate plan using prior run context.",
+        mode="plan",
+        raw_config={
+            "project": "OpenCHAMI",
+            "problem": "Generate plan using prior run context.",
+            "mode": "plan",
+        },
+        workspace=workspace,
+        planner_model="openai:gpt-5.4",
+        repos=[RepoSpec(name="svc", path=repo_path)],
+    )
+
+    (workspace / cfg.explore_handoff_json).parent.mkdir(parents=True, exist_ok=True)
+    (workspace / cfg.explore_handoff_json).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "producer_phase": "summarize",
+                "verification": {
+                    "summary_verdict": "FAIL",
+                    "required_failures": ["repo_health"],
+                },
+                "resume_hints": {
+                    "resume_replan_scope": "current",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    tracker_updates: list[dict[str, object]] = []
+
+    def fake_update_tracker_markdown(**kwargs):
+        tracker_updates.append(kwargs)
+        return workspace / "plan" / "marvin.md"
+
+    monkeypatch.setattr("openchami_coding_agent.pipeline.ensure_repo", lambda repo: None)
+    monkeypatch.setattr("openchami_coding_agent.pipeline.render_status", lambda cfg: None)
+    monkeypatch.setattr("openchami_coding_agent.pipeline.emit_panel", lambda *args, **kwargs: None)
+    monkeypatch.setattr("openchami_coding_agent.pipeline.emit_text", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "openchami_coding_agent.pipeline.generate_plan",
+        lambda cfg: ("1. Inspect prior failures\n", {"structured_plan": {"steps": []}}),
+    )
+    monkeypatch.setattr(
+        "openchami_coding_agent.pipeline.update_tracker_markdown",
+        fake_update_tracker_markdown,
+    )
+
+    assert run_pipeline(cfg) == 0
+    assert tracker_updates
+
+    explore_update = tracker_updates[0]
+    assert explore_update["stage"] == "explore"
+    notes = explore_update["notes"]
+    assert isinstance(notes, list)
+    assert any("Loaded summarize handoff" in note for note in notes)
+    assert any("Prior verification verdict: FAIL" in note for note in notes)
+    assert any("Suggested replan scope from prior run: current" in note for note in notes)

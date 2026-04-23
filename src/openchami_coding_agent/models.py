@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, TypedDict
 
 from .constants import (
     AGENT_NAME,
     AGENT_PERSONA_INSTRUCTION,
     DEFAULT_EXEC_PROGRESS_JSON,
+    DEFAULT_EXPLORE_HANDOFF_JSON,
     DEFAULT_OPERATOR_FEEDBACK_MD,
     DEFAULT_PLAN_JSON,
     DEFAULT_PARTIAL_SUCCESS_JSON,
@@ -17,6 +18,8 @@ from .constants import (
     DEFAULT_RECOMMENDED_CONFIG_YAML,
     DEFAULT_RECOMMENDED_OPERATOR_FEEDBACK_MD,
     DEFAULT_SUMMARY_JSON,
+    DEFAULT_VERIFICATION_JSON,
+    DEFAULT_VERIFICATION_MD,
     DEFAULT_WORKSPACE_ANALYSIS_JSON,
     DEFAULT_WORKSPACE_ANALYSIS_MD,
 )
@@ -176,6 +179,34 @@ class RunTrace:
         )
 
 
+WorkflowPhase = Literal["explore", "plan", "execute", "verify", "summarize"]
+VerificationVerdict = Literal["PASS", "FAIL", "PARTIAL"]
+
+
+class VerificationBundle(TypedDict):
+    workspace_path: str
+    repo_states: dict[str, str]
+    plan_path: str | None
+    execution_summary_path: str | None
+    changed_files: list[str]
+    diff_path: str | None
+    run_trace_path: str | None
+    repo_profile_paths: list[str]
+    artifact_dir: str
+
+
+class VerifierResult(TypedDict):
+    name: str
+    verdict: VerificationVerdict
+    required: bool
+    tier: int
+    scope: str
+    evidence: list[str]
+    findings: list[str]
+    artifacts: list[str]
+    rerun_recommended: bool
+
+
 @dataclass
 class AgentConfig:
     project: str
@@ -189,6 +220,7 @@ class AgentConfig:
     proposal_markdown: str = DEFAULT_PROPOSAL_MD
     plan_json: str = DEFAULT_PLAN_JSON
     summary_json: str = DEFAULT_SUMMARY_JSON
+    explore_handoff_json: str = DEFAULT_EXPLORE_HANDOFF_JSON
     partial_success_json: str = DEFAULT_PARTIAL_SUCCESS_JSON
     operator_feedback_markdown: str = DEFAULT_OPERATOR_FEEDBACK_MD
     workspace_analysis_markdown: str = DEFAULT_WORKSPACE_ANALYSIS_MD
@@ -223,8 +255,14 @@ class AgentConfig:
     confirm_timeout_sec: int = 30
     resume_from: str | None = None
     executor_progress_json: str = DEFAULT_EXEC_PROGRESS_JSON
+    verification_json: str = DEFAULT_VERIFICATION_JSON
+    verification_markdown: str = DEFAULT_VERIFICATION_MD
     repo_dependencies: dict[str, list[str]] = field(default_factory=dict)
     repo_order: list[str] = field(default_factory=list)
+    repo_profiles_dir: str = "repo_profiles"
+    enabled_verifiers: list[str] = field(default_factory=list)
+    disabled_verifiers: list[str] = field(default_factory=list)
+    enabled_verifier_tiers: list[int] = field(default_factory=lambda: [1, 2])
     verbose_io: bool = False
     commit_each_step: bool = True
     allow_user_prompts: bool = True
@@ -258,6 +296,18 @@ class AgentConfig:
             return value.strip()
         return ""
 
+    @staticmethod
+    def _int_list(value: Any, default: list[int]) -> list[int]:
+        if not isinstance(value, list):
+            return list(default)
+        parsed: list[int] = []
+        for item in value:
+            try:
+                parsed.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return parsed or list(default)
+
     @classmethod
     def from_raw(
         cls,
@@ -284,6 +334,9 @@ class AgentConfig:
             proposal_markdown=outputs.get("proposal_markdown", DEFAULT_PROPOSAL_MD),
             plan_json=outputs.get("plan_json", DEFAULT_PLAN_JSON),
             summary_json=outputs.get("summary_json", DEFAULT_SUMMARY_JSON),
+            explore_handoff_json=outputs.get(
+                "explore_handoff_json", DEFAULT_EXPLORE_HANDOFF_JSON
+            ),
             partial_success_json=outputs.get(
                 "partial_success_json", DEFAULT_PARTIAL_SUCCESS_JSON
             ),
@@ -347,11 +400,32 @@ class AgentConfig:
             executor_progress_json=outputs.get(
                 "executor_progress_json", DEFAULT_EXEC_PROGRESS_JSON
             ),
+            verification_json=outputs.get(
+                "verification_json", DEFAULT_VERIFICATION_JSON
+            ),
+            verification_markdown=outputs.get(
+                "verification_markdown", DEFAULT_VERIFICATION_MD
+            ),
             repo_dependencies={
                 str(key): [str(value) for value in (values or [])]
                 for key, values in dict(execution.get("repo_dependencies", {})).items()
             },
             repo_order=[str(value) for value in (execution.get("repo_order", []) or [])],
+            repo_profiles_dir=str(execution.get("repo_profiles_dir") or "repo_profiles"),
+            enabled_verifiers=[
+                str(value)
+                for value in (execution.get("enabled_verifiers", []) or [])
+                if str(value).strip()
+            ],
+            disabled_verifiers=[
+                str(value)
+                for value in (execution.get("disabled_verifiers", []) or [])
+                if str(value).strip()
+            ],
+            enabled_verifier_tiers=[
+                value
+                for value in cls._int_list(execution.get("enabled_verifier_tiers"), [1, 2])
+            ],
             verbose_io=bool(execution.get("verbose_io", False)),
             commit_each_step=bool(execution.get("commit_each_step", True)),
         )

@@ -1,0 +1,29 @@
+repo: openchami-core
+language_toolchain:
+  - python
+  - go
+validation_commands:
+  - pytest -q
+  - go test ./...
+smoke_tests:
+  - marvin --help
+packaging_commands:
+  - python -m build
+dangerous_operations:
+  - git reset --hard
+  - rm -rf /
+critical_files:
+  - pyproject.toml
+  - README.md
+service_boundaries:
+  - boot-service
+  - tokensmith
+related_repos:
+  - marvin
+protected_paths:
+  - .github/
+  - scripts/
+operator_sensitive_behavior:
+  - Changes affecting deployment or service restarts require operator note updates.
+resume_idempotence_expectations:
+  - Re-running verification should not mutate source repositories.

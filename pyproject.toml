@@ -40,8 +40,10 @@ include = ["openchami_coding_agent*"]
 
 [tool.setuptools.package-data]
 openchami_coding_agent = [
+  "prompt_library/*.md",
   "prompt_library/appendices/*.md",
   "prompt_library/briefs/*.md",
+  "prompt_library/reminders/*.md",
 ]
 
 [tool.pytest.ini_options]
